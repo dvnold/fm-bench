@@ -10,25 +10,27 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+permissions:
+  contents: read
 
 jobs:
   test:
-    # macOS minutes cost 10x, so the matrix brackets the supported range
-    # (engines: node >=20) instead of testing every LTS in between.
+    # macOS minutes cost 10x, so the matrix covers each Node release line that
+    # is still maintained (engines: node >=22) rather than every minor.
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 24]
+        node: [22, 24, 26]
     runs-on: macos-15
+    timeout-minutes: 15
     name: node ${{ matrix.node }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
       - run: npm ci
       - name: Lint, test, and verify package contents
         run: npm run check
@@ -43,8 +45,10 @@ jobs:
           node bin/fm-bench.js --help > /dev/null
           node bin/fm-bench.js legend --json | node -e "const fs=require('fs');const entries=JSON.parse(fs.readFileSync(0,'utf8'));if(!Array.isArray(entries)||entries.length<10)throw new Error('legend --json output looks wrong')"
           node bin/fm-bench.js doctor
-          node bin/fm-bench.js models --format json | node -e "const fs=require('fs');const models=JSON.parse(fs.readFileSync(0,'utf8'));if(!Array.isArray(models)||models.length<1)throw new Error('models --json output looks wrong')"
-          node bin/fm-bench.js --profile quick --runs 1 --no-progress --json | node -e "const fs=require('fs');const report=JSON.parse(fs.readFileSync(0,'utf8'));if(report.version!==require('./package.json').version)throw new Error('report version mismatch');if(!report.results.some(r=>r.ok&&r.firstTokenMs>0))throw new Error('no measured result')"
+          node bin/fm-bench.js models --format json | node -e "const fs=require('fs');const models=JSON.parse(fs.readFileSync(0,'utf8'));if(!Array.isArray(models)||models[0]?.identity!=='AFM 3 Core Advanced')throw new Error('models --json output looks wrong')"
+          node bin/fm-bench.js --profile quick --runs 2 --no-progress --json | node -e "const fs=require('fs');const report=JSON.parse(fs.readFileSync(0,'utf8'));if(report.version!==require('./package.json').version)throw new Error('report version mismatch');if(!report.results.some(r=>r.ok&&r.firstTokenMs>0))throw new Error('no measured result');if(!report.tokenCounter?.calibrated)throw new Error('token counter not calibrated')"
+          FAKE_FM_SCENARIO=legacy-available node bin/fm-bench.js models
+          FAKE_FM_SCENARIO=legacy-available node bin/fm-bench.js --profile quick --no-progress --ci
       - name: macOS version gate without an explicit fm binary
         run: |
           major="$(sw_vers -productVersion | cut -d. -f1)"
@@ -64,3 +68,17 @@ jobs:
           esac
       - name: Publish dry run
         run: npm run publish:dry-run
+
+  # Single required status for branch protection, independent of the matrix.
+  ci:
+    if: always()
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every matrix job to pass
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "test matrix result: ${{ needs.test.result }}"
+            exit 1
+          fi

@@ -12,32 +12,43 @@ concurrency:
   group: version-${{ github.repository }}
   cancel-in-progress: false
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 permissions:
+  # actions: dispatch the Release workflow; a tag pushed with GITHUB_TOKEN
+  # does not trigger workflows on its own.
+  actions: write
   contents: write
 
 jobs:
   version:
     runs-on: macos-15
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: main
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
-          cache: npm
+          node-version: 24
 
       - run: npm ci
       - name: Lint, test, and verify package contents
         run: npm run check
 
-      - run: |
+      - name: Bump, tag, and push
+        env:
+          VERSION_ARG: ${{ inputs.version }}
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          npm version "${{ inputs.version }}" -m "Release %s"
+          npm version "$VERSION_ARG" -m "Release %s"
           git push origin HEAD:main --follow-tags
+
+      - name: Start the Release workflow for the new tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          gh workflow run release.yml --ref main -f tag="$tag"
+          echo "Dispatched Release for $tag"
