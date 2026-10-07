@@ -1,0 +1,2 @@
+System: [38;2;255;193;7mNot applicable (quota only applies to PCC)[0m
+PCC: unavailable ([38;2;255;107;128mPrivate Cloud Compute is not available in this context. Please use the Terminal app.[0m)

@@ -263,3 +263,36 @@ test('summarizeByModel leaves goodput unmeasured without an SLO verdict', () => 
   assert.equal(summary[0].goodputRate, null);
   assert.equal(summary[0].goodputRps, null);
 });
+
+test('decodeThroughput is token-weighted so a short tail cannot dominate', () => {
+  const run = (promptId, decodeTokens, generationMs) => ({
+    model: 'system', promptId, run: 1, ok: true, durationMs: generationMs + 600,
+    decodeTokens, generationMs, decodeTokensPerSecond: decodeTokens / (generationMs / 1000)
+  });
+  const [row] = summarizeByModel(
+    [run('tail', 4, 20), run('long', 200, 4000)],
+    [{ name: 'system', available: true }]
+  );
+  assert.equal(row.decodeTokensPerSecond.avg, 125, 'the plain mean is dragged up by the 200 tok/s tail');
+  assert.ok(Math.abs(row.decodeThroughput - (204 / 4.02)) < 1e-9);
+
+  const none = summarizeByModel([run('x', null, 0)], [{ name: 'system', available: true }]);
+  assert.equal(none[0].decodeThroughput, null);
+});
+
+test('stabilityCv measures run-to-run variation per prompt, not the spread between prompts', () => {
+  const run = (promptId, durationMs, index) => ({
+    model: 'system', promptId, run: index, ok: true, durationMs, startOffsetMs: index * 1000, endOffsetMs: index * 1000 + durationMs
+  });
+  // Two perfectly steady prompts with very different lengths.
+  const steady = [run('short', 200, 1), run('short', 200, 2), run('long', 2000, 3), run('long', 2000, 4)];
+  const [row] = summarizeByModel(steady, [{ name: 'system', available: true }]);
+  assert.equal(row.stabilityCv, 0, 'no run-to-run variation at all');
+  assert.ok(row.latency.cv > 0.8, 'the pooled CV only reflects that the prompts differ');
+
+  const single = summarizeByModel([run('short', 200, 1), run('long', 2000, 2)], [{ name: 'system', available: true }]);
+  assert.equal(single[0].stabilityCv, null, 'one run per prompt cannot show stability');
+
+  const noisy = summarizeByModel([run('a', 100, 1), run('a', 300, 2)], [{ name: 'system', available: true }]);
+  assert.ok(Math.abs(noisy[0].stabilityCv - (Math.sqrt(20000) / 200)) < 1e-9);
+});

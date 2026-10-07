@@ -55,6 +55,12 @@ export function renderBenchmarkReport(payload, options = {}) {
   const note = payload.options?.note ?? null;
   lines.push(...wrapText(title, width));
   lines.push(...wrapText(meta, width));
+  const identities = (payload.models ?? [])
+    .filter((model) => model.available && model.identity)
+    .map((model) => `${model.name} = ${model.identity}`);
+  if (identities.length > 0) {
+    lines.push(...wrapText(`models: ${identities.join(', ')}`, width));
+  }
   if (tags.length > 0) {
     for (const line of wrapText(`tags: ${tags.join(', ')}`, width)) lines.push(line);
   }
@@ -88,21 +94,22 @@ export function legendEntries() {
     entry('summary', 'SUCC / SUCCESS', 'Success rate: successful runs divided by attempted runs.', 'Green 100%, yellow >=95%, red <95%.', 'measured'),
     entry('summary', 'GOOD', 'Goodput rate: successful runs that also met every configured SLO.', 'Only appears when SLO flags are set. Runs whose SLO metric is unmeasurable count as not good.', 'derived'),
     entry('summary', 'GOOD RPS', 'SLO-passing requests per second during this measured window.', 'Zero is shown when SLOs are set and no request meets them.', 'derived'),
-    entry('summary', 'TTFT', 'Time from starting fm respond to the first streamed stdout chunk, p50.', 'Proxy for time to first token: measured at chunk granularity, not per token. Lower is better.', 'proxy'),
+    entry('summary', 'TTFT', 'Time from starting fm respond to the first streamed stdout chunk, p50.', 'Proxy for time to first token: measured at chunk granularity, and the first chunk can already hold many tokens (see 1ST CHUNK). Lower is better.', 'proxy'),
     entry('summary', 'TTFT P95', '95th percentile time to the first streamed stdout chunk.', 'Lower is better.', 'proxy'),
     entry('summary', 'E2E', 'End-to-end latency, p50, from starting fm respond until full response exits.', 'Lower is better. This is a direct wall-clock measurement.', 'measured'),
     entry('summary', 'E2E P95', '95th percentile end-to-end latency.', 'Lower is better; this is usually the main interactive tail-latency signal.', 'measured'),
-    entry('summary', 'TPOT', 'Time per output token after the first output token, p50.', 'Derived from fm token counts and stream timings. Lower is better.', 'derived'),
-    entry('summary', 'TPOT P95', '95th percentile time per output token after first token.', 'Lower is better.', 'derived'),
+    entry('summary', 'TPOT', 'Time per output token for tokens that arrived after the first streamed chunk, p50.', 'Derived from fm token counts and stream timings. Lower is better.', 'derived'),
+    entry('summary', 'TPOT P95', '95th percentile time per output token after the first streamed chunk.', 'Lower is better.', 'derived'),
     entry('summary', 'USER/S / USER T/S', 'Per-request output tokens per second.', 'Derived from fm token counts. Higher is better.', 'derived'),
     entry('summary', 'SYS/S / SYS T/S', 'Aggregate successful output-token throughput for the model row.', 'Higher is better.', 'derived'),
     entry('summary', 'RPS', 'Successful requests per second over the model row measured window.', 'Measured from process timings. Higher is better.', 'measured'),
-    entry('summary', 'CV', 'Coefficient of variation for E2E latency: sample stddev divided by mean.', 'Lower is steadier. Green <=10%, yellow <=25%, red >25%.', 'derived'),
+    entry('summary', 'CV', 'Run-to-run E2E variation: coefficient of variation of each prompt across its repeated runs, averaged over prompts.', 'Lower is steadier. Green <=10%, yellow <=25%, red >25%. Blank until a prompt has two successful runs (use --runs 2 or more).', 'derived'),
     entry('summary', 'NOTE', 'Short unavailable, skipped, or error note.', '', 'measured'),
     entry('detail', 'IN AVG / IN TOK AVG', 'Average prompt/input token count from fm count-tokens.', 'Blank when the fm build cannot count tokens.', 'measured'),
-    entry('detail', 'OUT AVG / OUT TOK AVG', 'Average output token count from fm count-tokens.', 'Blank when the fm build cannot count tokens.', 'measured'),
+    entry('detail', 'OUT AVG / OUT TOK AVG', 'Average output token count from fm count-tokens, minus its constant framing token.', 'Blank when the fm build cannot count tokens.', 'measured'),
+    entry('detail', '1ST CHUNK', 'Average output tokens carried by the first streamed stdout chunk.', 'Shows what TTFT really measures: fm streams coarse deltas (about 20 tokens in the first chunk on macOS 27.2). Wide layout only.', 'measured'),
     entry('detail', 'PREFILL/S / PREFILL TOK/S', 'Prompt tokens divided by TTFT seconds.', 'Proxy: prefill is inferred from time to first chunk, not observed directly. Higher is better.', 'proxy'),
-    entry('detail', 'DECODE/S / DECODE TOK/S', 'Output tokens after the first token divided by generation seconds.', 'Derived; requires streaming and token counts. Higher is better.', 'derived'),
+    entry('detail', 'DECODE/S / DECODE TOK/S', 'Output tokens that arrived after the first streamed delivery, summed over runs, divided by the summed generation time.', 'Derived and token-weighted, so long generations dominate short tails; requires streaming and token counts. Higher is better.', 'derived'),
     entry('detail', '2ND CHUNK', 'Delay between the first and second streamed stdout chunks, p50.', 'Lower is smoother startup. Chunk-based, not raw token telemetry.', 'proxy'),
     entry('detail', 'CHUNK P95', '95th percentile gap between consecutive streamed stdout chunks.', 'Proxy for decode smoothness at chunk granularity. Lower is smoother.', 'proxy'),
     entry('detail', 'E2E P99', '99th percentile end-to-end latency.', 'Lower is better; useful for worst-case UX.', 'measured'),
@@ -110,7 +117,8 @@ export function legendEntries() {
     entry('detail', 'REPEAT', 'Share of repeated runs for a prompt that produced the most common normalized output hash.', 'Green 90%+, yellow 50%+, red below 50%. Blank when there are not repeated comparable outputs.', 'derived'),
     entry('detail', 'ATTEMPTS', 'Total fm invocations including retries.', 'Shown in reports; a retried run is still one measured result.', 'measured'),
     entry('detail', 'DESCRIPTION', 'Model description discovered from fm help.', '', 'measured'),
-    entry('models', 'AVAILABLE', 'Whether fm available reports the model as usable on this machine right now.', '', 'measured'),
+    entry('models', 'AVAILABLE', 'Whether fm models (fm available on older builds) reports the model as usable on this machine right now.', '', 'measured'),
+    entry('models', 'IDENTITY', 'Model identity reported by fm models, for example AFM 3 Core Advanced.', 'Recorded in reports; compare warns when it changes between two runs.', 'measured'),
     entry('models', 'QUOTA', 'Quota information when the fm build exposes a quota command.', 'Column is omitted entirely when the installed fm has no quota command.', 'measured'),
     entry('metrics', 'SOURCE', 'How a metric is obtained: measured, proxy, derived, or controlled.', 'measured = observed directly; proxy = observed at coarser granularity; derived = computed from measured values.', 'measured'),
     entry('compact', 'GOOD / CV / TPOT / CHUNK', 'Compact output combines the same summary and detail metrics into model cards.', 'Same definitions and color rules as table columns.', 'derived'),
@@ -220,7 +228,7 @@ export function renderSummaryTable(summary, options = {}) {
       cell(formatNumber(item.tokensPerSecond.avg), tones.userTps),
       cell(formatNumber(item.outputTokenThroughput), tones.systemTps),
       cell(formatNumber(item.rps), tones.rps),
-      cell(formatPercent(item.latency.cv), cvTone(item.latency.cv)),
+      cell(formatPercent(stabilityCv(item)), cvTone(stabilityCv(item))),
       cell(item.available ? '' : cleanReason(item.skippedReason), item.available ? null : 'yellow')
     ];
 
@@ -274,20 +282,21 @@ export function renderDetailTable(summary, options = {}) {
       cell(formatNumber(item.promptTokens.avg, 0)),
       cell(formatNumber(item.outputTokens.avg, 0)),
       cell(formatNumber(item.prefillTokensPerSecond?.avg), tones.prefillTps),
-      cell(formatNumber(item.decodeTokensPerSecond?.avg), tones.decodeTps),
+      cell(formatNumber(decodeRate(item)), tones.decodeTps),
       cell(formatMs(item.secondChunk?.p50), tones.secondChunk),
       cell(formatMs(item.chunkGap?.p95), tones.chunkGapP95),
       cell(formatMs(item.latency.p99), tones.e2eP99),
-      cell(formatRangeMs(item.latency.ci95Low, item.latency.ci95High), cvTone(item.latency.cv)),
+      cell(formatRangeMs(item.latency.ci95Low, item.latency.ci95High), cvTone(stabilityCv(item))),
       cell(formatPercent(item.repeatability), percentTone(item.repeatability, 0.5, 0.9)),
-      cell(item.description || '-', 'muted')
+      cell(item.description || '-', 'muted'),
+      cell(formatNumber(item.firstChunkTokens?.avg, 0))
     ];
 
     if (mode === 'medium') {
       return [base[0], base[1], base[2], base[3], base[4], base[5], base[7], base[8], base[10]];
     }
 
-    return base;
+    return [base[0], base[1], base[2], base[3], base[12], ...base.slice(4, 12)];
   });
 
   const headers = mode === 'medium'
@@ -297,6 +306,7 @@ export function renderDetailTable(summary, options = {}) {
       'model',
       'in tok avg',
       'out tok avg',
+      '1st chunk',
       'prefill tok/s',
       'decode tok/s',
       '2nd chunk',
@@ -325,7 +335,7 @@ export function renderCompactSummary(summary, options = {}) {
       const goodput = item.goodputRate == null ? '' : ` | good ${formatPercent(item.goodputRate)}`;
       const tones = metricTones(item, ranks, options.slo);
       lines.push(toneText(truncate(`  TTFT ${formatMs(item.ttft.p50)} p95 ${formatMs(item.ttft.p95)} | E2E ${formatMs(item.latency.p50)} p95 ${formatMs(item.latency.p95)} p99 ${formatMs(item.latency.p99)}`, width), worstTone(tones.ttft, tones.e2e, tones.e2eP95), options));
-      lines.push(toneText(truncate(`  user ${formatNumber(item.tokensPerSecond.avg)} tok/s | system ${formatNumber(item.outputTokenThroughput)} tok/s | RPS ${formatNumber(item.rps)} | CV ${formatPercent(item.latency.cv)}${goodput}`, width), worstTone(tones.userTps, tones.systemTps, cvTone(item.latency.cv), percentTone(item.goodputRate, 0.8, 1)), options));
+      lines.push(toneText(truncate(`  user ${formatNumber(item.tokensPerSecond.avg)} tok/s | system ${formatNumber(item.outputTokenThroughput)} tok/s | RPS ${formatNumber(item.rps)} | CV ${formatPercent(stabilityCv(item))}${goodput}`, width), worstTone(tones.userTps, tones.systemTps, cvTone(stabilityCv(item)), percentTone(item.goodputRate, 0.8, 1)), options));
       lines.push(toneText(truncate(`  prefill ${formatNumber(item.prefillTokensPerSecond?.avg)} tok/s | TPOT ${formatMs(item.tpot.p50)} | chunk p95 ${formatMs(item.chunkGap?.p95)}`, width), worstTone(tones.prefillTps, tones.tpot, tones.chunkGapP95), options));
       lines.push(toneText(truncate(`  in/out ${formatNumber(item.promptTokens.avg, 0)}/${formatNumber(item.outputTokens.avg, 0)} tok avg | repeat ${formatPercent(item.repeatability)}`, width), percentTone(item.repeatability, 0.5, 0.9), options));
     } else {
@@ -344,29 +354,37 @@ export function renderModelsTable(models, options = {}) {
   if (compact) {
     return models.map((model) => {
       const status = model.available ? 'yes' : 'no';
-      return `${model.name} ${toneText(status, model.available ? 'green' : 'yellow', options)} ${compactReason(model.reason || model.description || '-')}`;
+      const detail = model.available ? (model.identity || model.description) : model.reason;
+      return `${model.name} ${toneText(status, model.available ? 'green' : 'yellow', options)} ${compactReason(detail || model.description || '-')}`;
     }).join('\n');
   }
 
   const quotaSupported = options.capabilities
     ? Boolean(options.capabilities.features?.quota)
     : models.some((model) => model.quotaSupported === true || (model.quota != null && model.quota !== ''));
+  const hasIdentity = models.some((model) => model.identity);
+  const base = (model) => {
+    const cells = [
+      cell(model.name),
+      cell(model.available ? 'yes' : 'no', model.available ? 'green' : 'yellow')
+    ];
+    if (hasIdentity) cells.push(model.identity || '-');
+    cells.push(model.description || '-');
+    return cells;
+  };
+  const leading = hasIdentity ? ['model', 'available', 'identity', 'description'] : ['model', 'available', 'description'];
 
   if (!quotaSupported) {
-    return renderTable(['model', 'available', 'description', 'notes'], models.map((model) => [
-      cell(model.name),
-      cell(model.available ? 'yes' : 'no', model.available ? 'green' : 'yellow'),
-      model.description || '-',
+    return renderTable([...leading, 'notes'], models.map((model) => [
+      ...base(model),
       cleanReason(model.reason || '-')
-    ]), { ...options, wrapColumns: ['description', 'notes'] });
+    ]), { ...options, wrapColumns: ['identity', 'description', 'notes'] });
   }
 
-  return renderTable(['model', 'available', 'description', 'quota'], models.map((model) => [
-    cell(model.name),
-    cell(model.available ? 'yes' : 'no', model.available ? 'green' : 'yellow'),
-    model.description || '-',
+  return renderTable([...leading, 'quota'], models.map((model) => [
+    ...base(model),
     cleanReason(model.quota || model.reason || '-')
-  ]), { ...options, wrapColumns: ['description', 'quota'] });
+  ]), { ...options, wrapColumns: ['identity', 'description', 'quota'] });
 }
 
 /**
@@ -388,6 +406,22 @@ export function renderModelsReport(models, options = {}) {
   }
   lines.push(renderModelsTable(models, options));
   return lines.join('\n');
+}
+
+/**
+ * Run-to-run CV for a summary row. Reports written before `stabilityCv`
+ * existed only have the suite-wide `latency.cv`.
+ */
+export function stabilityCv(item) {
+  return Object.hasOwn(item, 'stabilityCv') ? item.stabilityCv : item.latency?.cv ?? null;
+}
+
+/**
+ * Token-weighted decode rate for a summary row. Reports written before
+ * `decodeThroughput` existed only have the mean of per-run rates.
+ */
+export function decodeRate(item) {
+  return Object.hasOwn(item, 'decodeThroughput') ? item.decodeThroughput : item.decodeTokensPerSecond?.avg ?? null;
 }
 
 function formatRangeMs(low, high) {
@@ -739,7 +773,7 @@ function rankSummary(summary) {
     totalTps: collectMetric(summary, (item) => item.totalTokenThroughput),
     rps: collectMetric(summary, (item) => item.rps),
     goodputRps: collectMetric(summary, (item) => item.goodputRps),
-    decodeTps: collectMetric(summary, (item) => item.decodeTokensPerSecond?.avg),
+    decodeTps: collectMetric(summary, decodeRate),
     prefillTps: collectMetric(summary, (item) => item.prefillTokensPerSecond?.avg)
   };
 }
@@ -788,7 +822,7 @@ function metricTones(item, ranks, slo = {}) {
     totalTps: rankTone(item.totalTokenThroughput, ranks.totalTps),
     rps: rankTone(item.rps, ranks.rps),
     goodputRps: goodputRpsTone(item, ranks.goodputRps),
-    decodeTps: rankTone(item.decodeTokensPerSecond?.avg, ranks.decodeTps),
+    decodeTps: rankTone(decodeRate(item), ranks.decodeTps),
     prefillTps: rankTone(item.prefillTokensPerSecond?.avg, ranks.prefillTps)
   };
 }

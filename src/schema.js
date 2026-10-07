@@ -62,9 +62,28 @@ export function environmentFingerprint(report) {
     macOSBuildVersion: build,
     fmBin: env.fmBin ?? null,
     fmHelpDigest: env.fmHelpDigest ?? null,
+    modelIdentities: modelIdentities(report),
     thermal: env.thermal ?? null,
     power: env.power ?? null
   };
+}
+
+/**
+ * Model name → identity reported by `fm models` (for example
+ * `{ system: 'AFM 3 Core Advanced' }`). Empty for reports from builds or
+ * fm-bench versions that do not expose it.
+ * @param {Record<string, unknown>} report
+ * @returns {Record<string, string>}
+ */
+export function modelIdentities(report) {
+  const identities = {};
+  const models = Array.isArray(report.models) ? report.models : [];
+  for (const model of models) {
+    if (model && typeof model.name === 'string' && typeof model.identity === 'string' && model.identity) {
+      identities[model.name] = model.identity;
+    }
+  }
+  return identities;
 }
 
 /**
@@ -98,6 +117,12 @@ export function compareCompatibility(before, after) {
   }
   if (bFp.macOSBuildVersion && aFp.macOSBuildVersion && bFp.macOSBuildVersion !== aFp.macOSBuildVersion) {
     warnings.push(`macOS build differs (${bFp.macOSBuildVersion} vs ${aFp.macOSBuildVersion})`);
+  }
+  for (const [name, identity] of Object.entries(bFp.modelIdentities)) {
+    const other = aFp.modelIdentities[name];
+    if (other && other !== identity) {
+      warnings.push(`model ${name} differs (${identity} vs ${other})`);
+    }
   }
 
   return {

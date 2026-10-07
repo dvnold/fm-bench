@@ -24,22 +24,35 @@ function tempDir() {
   return mkdtempSync(join(tmpdir(), 'fm-bench-int-'));
 }
 
-test('models lists discovered models without leaking fm error text', () => {
-  const result = runCliWithFakeFm(['models']);
+test('models on a macOS 27.0 build lists models without leaking fm error text', () => {
+  const result = runCliWithFakeFm(['models'], 'legacy-available');
   assert.equal(result.code, 0);
   assert.match(result.stdout, /system/);
   assert.match(result.stdout, /count-tokens/);
+  assert.match(result.stdout, /available/);
   assert.doesNotMatch(result.stdout, /Unknown command/);
   assert.doesNotMatch(result.stdout, /quota-usage/);
-  assert.doesNotMatch(result.stdout, /\| QUOTA \|/);
+  assert.doesNotMatch(result.stdout, /QUOTA/);
   assert.match(result.stdout, /no quota command/);
 });
 
-test('models keeps a quota column when the fm build exposes quota', () => {
-  const result = runCliWithFakeFm(['models'], 'quota');
+test('models on a macOS 27.2 build reads fm models, identity, and quota', () => {
+  const result = runCliWithFakeFm(['models', '--width', '160']);
   assert.equal(result.code, 0);
+  assert.match(result.stdout, /commands {2}chat, config, count-tokens, license, models, quota-usage/);
+  assert.match(result.stdout, /IDENTITY/);
+  assert.match(result.stdout, /AFM 3 Core Advanced/);
   assert.match(result.stdout, /QUOTA/);
-  assert.match(result.stdout, /1000 requests remaining/);
+  assert.match(result.stdout, /Not applicable \(quota only applies to PCC\)/);
+  assert.doesNotMatch(result.stdout, /deprecated/);
+});
+
+test('models keeps the full Private Cloud Compute reason including its hint', () => {
+  const result = runCliWithFakeFm(['models', '--json'], 'multi-model');
+  assert.equal(result.code, 0);
+  const pcc = JSON.parse(result.stdout).find((model) => model.name === 'pcc');
+  assert.equal(pcc.available, false);
+  assert.equal(pcc.reason, 'Private Cloud Compute is not available in this context. Please use the Terminal app.');
 });
 
 test('models --json stays a plain array of models', () => {
@@ -64,9 +77,19 @@ test('a benchmark run produces measured TTFT, latency, and token counts', () => 
   assert.ok(measured[0].durationMs > 0, 'expected a measured end-to-end latency');
   assert.ok(measured[0].firstTokenMs <= measured[0].durationMs);
   assert.equal(measured[0].attempts, 1);
-  assert.equal(measured[0].promptTokens, 4);
-  assert.ok(measured[0].outputTokens > 0);
+  // Prompt tokens are fm's own count (4 words + 1 framing token); output
+  // tokens have the calibrated framing token removed.
+  assert.equal(measured[0].promptTokens, 5);
+  assert.deepEqual(report.tokenCounter, { command: 'count-tokens', overhead: 1, calibrated: true });
+  assert.equal(measured[0].outputTokens, 8, '"The on-device model replies with a deterministic answer." is 8 words');
+  assert.equal(measured[0].firstChunkTokens, 3, '"The on-device model " arrives as the first chunk');
   assert.ok(measured[0].tpotMs > 0, 'expected a derived TPOT for a multi-chunk stream');
+  assert.ok(
+    Math.abs(measured[0].decodeTokensPerSecond - (5 / (measured[0].generationMs / 1000))) < 1e-6,
+    'decode rate covers only the tokens after the first chunk'
+  );
+  assert.equal(report.models[0].identity, 'AFM 3 Core Advanced');
+  assert.deepEqual(report.suite.fingerprint.modelIdentities, { system: 'AFM 3 Core Advanced' });
   assert.equal(report.summary[0].successes, 1);
   assert.equal(report.summary[0].failures, 0);
   assert.equal(report.summary[0].latency.ci95Low, null, 'one sample has no confidence interval');
@@ -86,8 +109,12 @@ test('report records capabilities and per-metric availability', () => {
   assert.equal(report.metrics.e2eLatency.kind, 'measured');
   assert.equal(report.metrics.ttft.available, true);
   assert.equal(report.metrics.ttft.kind, 'proxy');
-  assert.equal(report.metrics.quota.available, false);
-  assert.match(report.metrics.quota.unavailableReason, /no quota command/);
+  assert.equal(report.metrics.quota.available, true);
+
+  const legacy = parseJsonReport(runCliWithFakeFm([...QUICK, '--json'], 'legacy-available').stdout);
+  assert.equal(legacy.metrics.quota.available, false);
+  assert.match(legacy.metrics.quota.unavailableReason, /no quota command/);
+  assert.equal(legacy.capabilities.features.modelListCommand, 'available');
 });
 
 test('--no-stream reports TTFT as unavailable instead of inventing it', () => {
@@ -117,7 +144,7 @@ test('a legacy token-count command is still used', () => {
   assert.equal(result.code, 0);
   const report = parseJsonReport(result.stdout);
   assert.equal(report.capabilities.features.tokenCountCommand, 'token-count');
-  assert.equal(report.results[0].promptTokens, 4);
+  assert.equal(report.results[0].promptTokens, 5);
 });
 
 test('table output names unavailable metrics instead of leaving blank columns', () => {
@@ -212,7 +239,10 @@ test('an unavailable model is skipped with the fm reason preserved', () => {
   assert.equal(result.code, 0);
   const models = JSON.parse(result.stdout);
   assert.equal(models[0].available, false);
-  assert.match(models[0].reason, /unavailable/);
+  assert.equal(models[0].reason, 'Apple Intelligence is not enabled on this Mac.');
+
+  const legacy = JSON.parse(runCliWithFakeFm(['models', '--json'], 'legacy-available').stdout);
+  assert.equal(legacy[0].available, true);
 });
 
 test('a partial stream is a failure and yields no fabricated decode metrics', () => {
@@ -407,7 +437,12 @@ test('a benchmark with no usable model fails fast with exit code 2', () => {
   const unavailable = runCliWithFakeFm([...QUICK, '--json'], 'unavailable');
   assert.equal(unavailable.code, 2);
   assert.match(unavailable.stderr, /none of the requested models are usable/);
-  assert.match(unavailable.stderr, /unavailable in this context/);
+  assert.match(unavailable.stderr, /system: Apple Intelligence is not enabled on this Mac\./);
+
+  const pcc = runCliWithFakeFm([...QUICK, '--json', '--models', 'pcc'], 'multi-model');
+  assert.equal(pcc.code, 2);
+  assert.match(pcc.stderr, /models reported by this fm build: system, pcc/, 'lists discovered models, not the request');
+  assert.match(pcc.stderr, /pcc: Private Cloud Compute is not available in this context\. Please use the Terminal app\./);
 });
 
 test('a very short answer yields generation time but no noise-dominated decode rate', () => {
@@ -470,4 +505,78 @@ test('--fail-fast stops admitting new work instead of finishing the queue', asyn
   // Three sequential respond calls become one; every other fm call is a probe
   // or token count that happens before the queue, so the delta is exactly 2.
   assert.equal(plain.invocations - fast.invocations, 2, `fail-fast made ${fast.invocations} fm calls vs ${plain.invocations}`);
+});
+
+test('a mistyped command is refused with a suggestion instead of benchmarked as a prompt', () => {
+  const typo = runCliWithFakeFm(['modles']);
+  assert.equal(typo.code, 2);
+  assert.match(typo.stderr, /Unknown command "modles"\. Did you mean "models"\?/);
+  assert.match(typo.stderr, /fm-bench -- modles/);
+
+  const prompt = runCliWithFakeFm([...QUICK, '--json', '--', 'modles']);
+  assert.equal(prompt.code, 0, '-- still benchmarks the word as a prompt');
+  assert.equal(JSON.parse(prompt.stdout).prompts[0].prompt, 'modles');
+
+  const word = runCliWithFakeFm([...QUICK, '--json', 'hello']);
+  assert.equal(word.code, 0, 'ordinary one-word prompts are not mistaken for commands');
+});
+
+test('a mistyped option names the closest real option', () => {
+  const result = runCli(['--rnus', '3']);
+  assert.equal(result.code, 2);
+  assert.match(result.stderr, /Unknown option: --rnus\. Did you mean --runs\?/);
+});
+
+test('one warmup per model runs by default and --warmup 0 disables it', () => {
+  const invocations = (args) => {
+    const pidFile = join(tempDir(), 'pids.txt');
+    const result = runCliWithFakeFm([...QUICK, '--json', ...args], 'normal', { env: { FAKE_FM_PID_FILE: pidFile } });
+    assert.equal(result.code, 0);
+    return { report: JSON.parse(result.stdout), calls: readFileSync(pidFile, 'utf8').trim().split('\n').length };
+  };
+  const warm = invocations([]);
+  const cold = invocations(['--warmup', '0']);
+  assert.equal(warm.report.options.warmup, 1);
+  assert.equal(cold.report.options.warmup, 0);
+  assert.equal(warm.calls - cold.calls, 1, 'exactly one extra unmeasured fm respond call');
+  assert.equal(warm.report.results.length, cold.report.results.length, 'warmups are never measured');
+});
+
+test('doctor reports the fm license status and model identity', () => {
+  const ok = JSON.parse(runCliWithFakeFm(['doctor', '--json']).stdout);
+  const license = ok.checks.find((check) => check.name === 'fm license');
+  assert.equal(license.ok, true);
+  assert.match(license.detail, /Agreed to license/);
+  assert.match(ok.checks.find((check) => check.name === 'model:system').detail, /available \(AFM 3 Core Advanced\)/);
+
+  const missing = runCliWithFakeFm(['doctor'], 'license-not-agreed');
+  assert.equal(missing.code, 0);
+  assert.match(missing.stdout, /warn fm license +You have not agreed .* run "fm license" to review and accept the terms/);
+});
+
+test('compare warns when the model behind a name changed between reports', () => {
+  const dir = tempDir();
+  const beforePath = join(dir, 'before.json');
+  const afterPath = join(dir, 'after.json');
+  assert.equal(runCliWithFakeFm([...QUICK, '--json', '--out', beforePath]).code, 0);
+  const after = JSON.parse(readFileSync(beforePath, 'utf8'));
+  after.models[0].identity = 'AFM 4 Core';
+  writeFileSync(afterPath, JSON.stringify(after));
+  const result = runCli(['compare', beforePath, afterPath]);
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /warn: +model system differs \(AFM 3 Core Advanced vs AFM 4 Core\)/);
+});
+
+test('a write burst after the first chunk is one delivery, not a decode measurement', () => {
+  const result = runCliWithFakeFm([...QUICK, '--json', '--runs', '3'], 'burst');
+  assert.equal(result.code, 0);
+  const report = parseJsonReport(result.stdout);
+  for (const run of report.results) {
+    assert.equal(run.ok, true);
+    assert.equal(run.outputTokens, 8);
+    assert.equal(run.generationMs, null, 'a burst cannot separate prefill from decode');
+    assert.equal(run.tpotMs, null);
+    assert.equal(run.decodeTokensPerSecond, null);
+    assert.deepEqual(run.chunkGapsMs, []);
+  }
 });

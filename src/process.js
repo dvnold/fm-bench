@@ -48,6 +48,7 @@ export function runProcess(command, args = [], options = {}) {
     let stdoutChunks = 0;
     let stderrChunks = 0;
     const stdoutChunkTimesMs = [];
+    const stdoutChunkLengths = [];
     let firstStdoutMs = null;
     let firstStderrMs = null;
     let timedOut = false;
@@ -71,7 +72,10 @@ export function runProcess(command, args = [], options = {}) {
       if (firstStdoutMs == null && chunk.length > 0) {
         firstStdoutMs = chunkAtMs;
       }
-      if (chunk.length > 0) stdoutChunkTimesMs.push(chunkAtMs);
+      if (chunk.length > 0) {
+        stdoutChunkTimesMs.push(chunkAtMs);
+        stdoutChunkLengths.push(chunk.length);
+      }
       stdout += chunk;
     });
     child.stderr.on('data', (chunk) => {
@@ -101,6 +105,7 @@ export function runProcess(command, args = [], options = {}) {
         stdoutChunks,
         stderrChunks,
         stdoutChunkTimesMs,
+        stdoutChunkLengths,
         firstStdoutMs,
         firstStderrMs,
         error,
@@ -120,6 +125,7 @@ export function runProcess(command, args = [], options = {}) {
         stdoutChunks,
         stderrChunks,
         stdoutChunkTimesMs,
+        stdoutChunkLengths,
         firstStdoutMs,
         firstStderrMs,
         error: null,

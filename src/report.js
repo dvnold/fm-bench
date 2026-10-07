@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { renderHtmlReport } from './export.js';
 
 export function toCsv(rows) {
   if (rows.length === 0) return '';
@@ -37,7 +38,8 @@ export function flattenResults(results) {
     chunk_gap_max_ms: round(result.chunkGapMaxMs),
     output_hash: result.outputHash || '',
     good: result.good == null ? '' : result.good,
-    error: result.error || ''
+    error: result.error || '',
+    first_chunk_tokens: result.firstChunkTokens ?? ''
   }));
 }
 
@@ -48,7 +50,6 @@ export async function writeReport(filePath, payload, format) {
   if (format === 'csv') {
     content = toCsv(flattenResults(payload.results));
   } else if (format === 'html') {
-    const { renderHtmlReport } = await import('./export.js');
     content = renderHtmlReport(payload);
   } else {
     content = `${JSON.stringify(payload, null, 2)}\n`;

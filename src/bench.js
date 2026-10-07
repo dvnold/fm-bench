@@ -1,6 +1,15 @@
 import crypto from 'node:crypto';
 import { detectFmCapabilities } from './capabilities.js';
-import { checkModelAvailability, collectEnvironment, countTokens, fmBinaryFromOptions, getQuotaUsage, respond } from './fm.js';
+import {
+  calibrateTokenCounter,
+  checkModelAvailability,
+  collectEnvironment,
+  countTokens,
+  fmBinaryFromOptions,
+  getQuotaUsage,
+  listModelStatus,
+  respond
+} from './fm.js';
 import { metricAvailability } from './metrics.js';
 import { loadPrompts } from './prompts.js';
 import { finalizeReportPayload } from './schema.js';
@@ -21,18 +30,22 @@ export async function inspectModels(options = {}) {
       ?? { name, description: 'Requested model not reported by this fm build' })
     : discovered.models;
 
+  const modelList = models.length > 0 ? await listModelStatus(discovered.fmBin, { ...options, capabilities }) : null;
   const inspected = [];
   for (const model of models) {
     const availability = await checkModelAvailability(discovered.fmBin, model.name, {
       ...options,
-      capabilities
+      capabilities,
+      modelList
     });
-    const quota = await getQuotaUsage(discovered.fmBin, model.name, {
-      ...options,
-      capabilities
-    });
+    // A model the build does not have has no quota; asking would only put fm's
+    // text for some other model where the "not supported" reason belongs.
+    const quota = availability.unsupported
+      ? { supported: false, raw: '', reason: '' }
+      : await getQuotaUsage(discovered.fmBin, model.name, { ...options, capabilities });
     inspected.push({
       ...model,
+      identity: availability.identity || '',
       available: availability.available,
       unsupported: Boolean(availability.unsupported),
       reason: availability.available ? '' : (availability.reason || availability.raw || 'unavailable'),
@@ -73,7 +86,7 @@ export async function runBenchmark(options = {}) {
     : inspection.models;
   const runnableModels = modelStatuses.filter((model) => model.available);
   if (runnableModels.length === 0) {
-    throw noRunnableModelsError(inspection.models, options);
+    throw noRunnableModelsError(inspection.models, capabilities.models, options);
   }
   const environment = await collectEnvironment(inspection.fmBin, { ...options, capabilities });
   const metrics = metricAvailability(capabilities, {
@@ -83,6 +96,16 @@ export async function runBenchmark(options = {}) {
   const promptTokenCounts = new Map();
   const concurrencies = normalizeConcurrencySweep(options);
   const totalRuns = concurrencies.length * runnableModels.length * prompts.length * options.runs;
+
+  const tokenCounter = {
+    command: capabilities.features.tokenCountCommand,
+    overhead: 0,
+    calibrated: false
+  };
+  if (metrics.outputTokens.available) {
+    notify(options, { type: 'phase', phase: 'tokens', message: 'calibrating token counter' });
+    Object.assign(tokenCounter, await calibrateTokenCounter(inspection.fmBin, { ...options, capabilities }));
+  }
 
   notify(options, {
     type: 'tokens:start',
@@ -123,6 +146,7 @@ export async function runBenchmark(options = {}) {
       modelStatuses,
       promptTokenCounts,
       tokenCounting: metrics.outputTokens.available,
+      tokenOverhead: tokenCounter.overhead,
       options,
       concurrency,
       scenarioIndex: scenarioIndex + 1,
@@ -171,6 +195,7 @@ export async function runBenchmark(options = {}) {
       warnings: capabilities.warnings
     },
     metrics,
+    tokenCounter,
     prompts: prompts.map((prompt) => ({
       id: prompt.id,
       prompt: prompt.prompt,
@@ -199,6 +224,7 @@ async function runScenario(context) {
     modelStatuses,
     promptTokenCounts,
     tokenCounting,
+    tokenOverhead,
     options,
     concurrency,
     scenarioIndex,
@@ -263,6 +289,7 @@ async function runScenario(context) {
       job,
       promptTokenCounts,
       tokenCounting,
+      tokenOverhead,
       options,
       benchmarkStartedAt
     });
@@ -289,7 +316,7 @@ async function runScenario(context) {
 }
 
 async function runSingleBenchmark(context) {
-  const { fmBin, capabilities, job, promptTokenCounts, tokenCounting, options, benchmarkStartedAt } = context;
+  const { fmBin, capabilities, job, promptTokenCounts, tokenCounting, tokenOverhead = 0, options, benchmarkStartedAt } = context;
   const maxAttempts = 1 + Math.max(0, options.retry ?? 0);
   const startOffsetMs = Number(process.hrtime.bigint() - benchmarkStartedAt) / 1e6;
   let response;
@@ -309,24 +336,34 @@ async function runSingleBenchmark(context) {
 
   const ok = response.ok;
   const seconds = response.durationMs / 1000;
-  const chunks = response.stdoutChunks ?? 0;
 
-  // A single stdout chunk carries the whole answer, so the streamed portion is
-  // not separable: report generation time and TPOT as unavailable rather than
-  // as a near-zero decode phase.
+  // When one delivery carries the whole answer, the streamed portion is not
+  // separable: report generation time and TPOT as unavailable rather than as
+  // a near-zero decode phase. Otherwise the generation window runs from the
+  // first to the last delivery, which excludes process teardown.
   const firstTokenMs = ok ? response.firstOutputMs : null;
-  const generationMs = ok && firstTokenMs != null && chunks > 1
-    ? Math.max(0, response.durationMs - firstTokenMs)
+  const deliveryTimes = response.deliveryTimesMs ?? [];
+  const generationMs = ok && firstTokenMs != null && deliveryTimes.length > 1
+    ? Math.max(0, deliveryTimes[deliveryTimes.length - 1] - firstTokenMs)
     : null;
 
-  const outputTokens = ok && tokenCounting
-    ? await countTokens(fmBin, response.output, { ...options, capabilities })
-    : { ok: false, count: null };
-  const countedOutputTokens = outputTokens.ok ? outputTokens.count : null;
+  const countOptions = { ...options, capabilities };
+  const countedOutputTokens = ok && tokenCounting
+    ? await countOutputTokens(fmBin, response.output, tokenOverhead, countOptions)
+    : null;
+  // fm streams coarse deltas: the first delivery carries about 20 tokens on
+  // macOS 27.2. Decode cadence is therefore measured over the tokens that
+  // arrived after it, not over "all tokens but one".
+  const firstChunkTokens = generationMs != null && countedOutputTokens != null
+    ? await countOutputTokens(fmBin, response.firstChunkText ?? '', tokenOverhead, countOptions)
+    : null;
   // Two decode tokens is the minimum for an inter-token interval that is not
   // simply the inverse of a single chunk gap.
-  const decodeTokenCount = countedOutputTokens != null && countedOutputTokens > 2
-    ? countedOutputTokens - 1
+  const tokensAfterFirstChunk = firstChunkTokens != null
+    ? countedOutputTokens - Math.min(firstChunkTokens, countedOutputTokens)
+    : null;
+  const decodeTokenCount = tokensAfterFirstChunk != null && tokensAfterFirstChunk >= 2
+    ? tokensAfterFirstChunk
     : null;
   const hasDecodeCadence = generationMs != null && generationMs > 0 && decodeTokenCount != null;
   const tpotMs = hasDecodeCadence ? generationMs / decodeTokenCount : null;
@@ -338,7 +375,7 @@ async function runSingleBenchmark(context) {
   const prefillTokensPerSecond = promptTokens != null && firstTokenMs != null && firstTokenMs > 0
     ? promptTokens / (firstTokenMs / 1000)
     : null;
-  const chunkGapsMs = ok ? chunkGaps(response.stdoutChunkTimesMs) : [];
+  const chunkGapsMs = ok ? chunkGaps(deliveryTimes) : [];
   const secondChunkMs = chunkGapsMs.length > 0 ? chunkGapsMs[0] : null;
 
   return {
@@ -354,6 +391,8 @@ async function runSingleBenchmark(context) {
     tpotMs,
     promptTokens,
     outputTokens: countedOutputTokens,
+    firstChunkTokens,
+    decodeTokens: hasDecodeCadence ? decodeTokenCount : null,
     chars,
     words,
     tokensPerSecond: countedOutputTokens != null && seconds > 0 ? countedOutputTokens / seconds : null,
@@ -377,6 +416,17 @@ async function runSingleBenchmark(context) {
     output: options.captureOutput ? response.output : undefined,
     error: ok ? '' : (response.error || `fm exited with code ${response.code ?? response.signal}`)
   };
+}
+
+/**
+ * Output token count with the token counter's framing overhead removed.
+ * Empty text is zero tokens; `fm count-tokens` rejects an empty prompt.
+ * @returns {Promise<number|null>}
+ */
+async function countOutputTokens(fmBin, text, overhead, options) {
+  if (!String(text).trim()) return 0;
+  const counted = await countTokens(fmBin, text, options);
+  return counted.ok ? Math.max(0, counted.count - overhead) : null;
 }
 
 async function runLimited(items, concurrency, worker, options = {}) {
@@ -404,9 +454,9 @@ async function runLimited(items, concurrency, worker, options = {}) {
 
 // A benchmark with nothing to run is a configuration error, not an empty
 // report: say which models were asked for and which ones the build supports.
-function noRunnableModelsError(models, options) {
+function noRunnableModelsError(models, discoveredModels, options) {
   const requested = normalizeModelSelection(options.models);
-  const supported = models.filter((model) => !model.unsupported).map((model) => model.name);
+  const supported = discoveredModels.map((model) => model.name);
   const lines = ['No benchmark was run: none of the requested models are usable right now.'];
   if (requested.length > 0) lines.push(`  requested: ${requested.join(', ')}`);
   if (supported.length > 0) lines.push(`  models reported by this fm build: ${supported.join(', ')}`);

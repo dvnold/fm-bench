@@ -31,7 +31,7 @@ const DEFINITIONS = [
     key: 'generationMs',
     label: 'generation time',
     kind: 'derived',
-    source: 'E2E latency minus TTFT',
+    source: 'last streamed stdout delivery minus the first (chunks under 5 ms apart are one delivery)',
     requires: ['streaming'],
     reason: 'requires at least two streamed output chunks to separate prefill from decode'
   },
@@ -39,9 +39,17 @@ const DEFINITIONS = [
     key: 'tpot',
     label: 'TPOT',
     kind: 'derived',
-    source: '(E2E - TTFT) / (output tokens - 1)',
+    source: 'generation time / output tokens that arrived after the first chunk',
     requires: ['streaming', 'tokenCounting'],
-    reason: 'requires streaming, a token-counting fm command, and at least three output tokens'
+    reason: 'requires streaming, a token-counting fm command, and at least two tokens after the first chunk'
+  },
+  {
+    key: 'firstChunkTokens',
+    label: 'first-chunk tokens',
+    kind: 'measured',
+    source: 'fm count-tokens on the first streamed stdout delivery, minus the counter framing overhead',
+    requires: ['streaming', 'tokenCounting'],
+    reason: 'requires streaming plus a token-counting fm command'
   },
   {
     key: 'promptTokens',
@@ -55,7 +63,7 @@ const DEFINITIONS = [
     key: 'outputTokens',
     label: 'output tokens',
     kind: 'measured',
-    source: 'fm count-tokens on the captured output',
+    source: 'fm count-tokens on the captured output, minus the calibrated counter framing overhead',
     requires: ['tokenCounting'],
     reason: 'this fm build exposes no token-counting command'
   },
@@ -71,9 +79,9 @@ const DEFINITIONS = [
     key: 'decodeTokensPerSecond',
     label: 'decode tokens/s',
     kind: 'derived',
-    source: '(output tokens - 1) / generation seconds',
+    source: 'output tokens after the first chunk / generation seconds',
     requires: ['streaming', 'tokenCounting'],
-    reason: 'requires streaming, a token-counting fm command, and at least three output tokens'
+    reason: 'requires streaming, a token-counting fm command, and at least two tokens after the first chunk'
   },
   {
     key: 'prefillTokensPerSecond',
@@ -102,7 +110,7 @@ const DEFINITIONS = [
     key: 'chunkGaps',
     label: 'chunk gaps and second-chunk delay',
     kind: 'proxy',
-    source: 'gaps between consecutive streamed stdout chunks',
+    source: 'gaps between consecutive streamed stdout deliveries (chunks under 5 ms apart are one delivery)',
     requires: ['streaming'],
     reason: 'requires an fm build whose output can be streamed'
   },

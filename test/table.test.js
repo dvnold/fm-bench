@@ -75,7 +75,7 @@ test('renderLegend explains table columns and CV thresholds', () => {
   assert.match(normalized, /Green <=10%, yellow/);
   assert.match(normalized, /<=25%, red >25%/);
   assert.match(normalized, /\| TABLE \| COLUMN \| SOURCE \| DEFINITION \| RULE \|/);
-  assert.equal(legendEntries().find((item) => item.column === 'CV').rule, 'Lower is steadier. Green <=10%, yellow <=25%, red >25%.');
+  assert.match(legendEntries().find((item) => item.column === 'CV').rule, /^Lower is steadier\. Green <=10%, yellow <=25%, red >25%\. Blank until a prompt has two successful runs/);
   assert.doesNotMatch(report, /…/);
   for (const line of report.split('\n')) {
     assert.ok(stripAnsi(line).length <= 100);
@@ -92,7 +92,7 @@ test('legendEntries include every table section', () => {
 
 test('renderLegend compact layout wraps without truncating', () => {
   const report = renderLegend({ width: 50, ascii: true, compact: true });
-  assert.match(report, /Definition: Coefficient of variation/);
+  assert.match(report, /Definition: Run-to-run E2E variation/);
   assert.match(report, /Rule: Lower is steadier/);
   assert.doesNotMatch(report, /…/);
   for (const line of report.split('\n')) {

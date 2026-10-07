@@ -74,3 +74,19 @@ test('diffReports warns when hardware differs', () => {
   const diff = diffReports(before, otherHardware);
   assert.ok(diff.compatibility.warnings.some((warning) => /hardware model differs/.test(warning)));
 });
+
+test('compare uses run-to-run CV only when both reports carry it', () => {
+  const report = (summary) => ({
+    tool: 'fm-bench', version: 'x', startedAt: '2026-01-01T00:00:00Z', options: {}, environment: {}, summary
+  });
+  const modern = (cv) => ({ model: 'system', concurrency: 1, stabilityCv: cv, latency: { cv: 0.9 } });
+  const legacy = { model: 'system', concurrency: 1, latency: { cv: 0.5 } };
+
+  const both = diffReports(report([modern(0.1)]), report([modern(0.2)]));
+  assert.equal(both.rows[0].cv.before, 0.1);
+  assert.equal(both.rows[0].cv.after, 0.2);
+
+  const mixed = diffReports(report([legacy]), report([modern(0.2)]));
+  assert.equal(mixed.rows[0].cv.before, 0.5, 'falls back to the pooled CV on both sides');
+  assert.equal(mixed.rows[0].cv.after, 0.9);
+});

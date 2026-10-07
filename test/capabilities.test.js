@@ -8,6 +8,7 @@ import {
   hasFlagInHelp,
   helpDigest,
   parseCommandsFromHelp,
+  resolveModelListCommand,
   resolveTokenCountCommand
 } from '../src/capabilities.js';
 import { parseModelsFromHelp } from '../src/fm-help.js';
@@ -67,11 +68,37 @@ test('helpDigest is stable and ignores ANSI escapes', () => {
   assert.match(helpDigest(realHelp), /^[0-9a-f]{16}$/);
 });
 
-test('detectFmCapabilities describes the captured macOS 27 fm surface', async () => {
+test('detectFmCapabilities describes the macOS 27.2 fm surface', async () => {
   const capabilities = await detectFmCapabilities(fakeFmPath(), {
     env: { ...process.env, FAKE_FM_SCENARIO: 'normal' }
   });
   assert.equal(capabilities.ok, true);
+  assert.deepEqual(capabilities.commands, [
+    'chat',
+    'config',
+    'count-tokens',
+    'license',
+    'models',
+    'quota-usage',
+    'respond',
+    'schema',
+    'serve'
+  ]);
+  assert.deepEqual(capabilities.models.map((model) => model.name), ['system']);
+  assert.equal(capabilities.features.tokenCounting, true);
+  assert.equal(capabilities.features.tokenCountCommand, 'count-tokens');
+  assert.equal(capabilities.features.modelListCommand, 'models');
+  assert.equal(capabilities.features.license, true);
+  assert.equal(capabilities.features.streaming, true);
+  assert.equal(capabilities.features.useCase, false);
+  assert.equal(capabilities.features.quota, true);
+  assert.deepEqual(capabilities.warnings, []);
+});
+
+test('detectFmCapabilities describes the macOS 27.0 fm surface', async () => {
+  const capabilities = await detectFmCapabilities(fakeFmPath(), {
+    env: { ...process.env, FAKE_FM_SCENARIO: 'legacy-available' }
+  });
   assert.deepEqual(capabilities.commands, [
     'available',
     'chat',
@@ -81,13 +108,30 @@ test('detectFmCapabilities describes the captured macOS 27 fm surface', async ()
     'schema',
     'serve'
   ]);
-  assert.deepEqual(capabilities.models.map((model) => model.name), ['system']);
-  assert.equal(capabilities.features.tokenCounting, true);
-  assert.equal(capabilities.features.tokenCountCommand, 'count-tokens');
-  assert.equal(capabilities.features.streaming, true);
-  assert.equal(capabilities.features.useCase, false);
+  assert.equal(capabilities.features.modelListCommand, 'available');
   assert.equal(capabilities.features.quota, false);
   assert.match(capabilities.warnings.join('\n'), /no quota command/);
+});
+
+test('the captured macOS 27.2 help parses to the real command, model, and flag set', () => {
+  const help = readFileSync(join(fixtureDir, 'fixtures/fm-help-macos27.2.txt'), 'utf8');
+  const respondHelp = readFileSync(join(fixtureDir, 'fixtures/fm-respond-help-macos27.2.txt'), 'utf8');
+  const commands = parseCommandsFromHelp(help);
+  assert.deepEqual(commands, ['chat', 'config', 'count-tokens', 'license', 'models', 'quota-usage', 'respond', 'schema', 'serve']);
+  assert.equal(resolveModelListCommand(commands), 'models');
+  assert.deepEqual(parseModelsFromHelp(help), [
+    { name: 'system', description: 'On-device Apple Foundation Model' },
+    { name: 'pcc', description: 'Apple Foundation Model on Private Cloud Compute' }
+  ], 'the "<model>" custom-provider placeholder is not a model');
+  for (const flag of ['--model', '--no-stream', '--instructions', '--greedy', '--use-case', '--guardrails']) {
+    assert.equal(hasFlagInHelp(respondHelp, flag), true, flag);
+  }
+});
+
+test('resolveModelListCommand prefers models over the deprecated available', () => {
+  assert.equal(resolveModelListCommand(['available', 'models']), 'models');
+  assert.equal(resolveModelListCommand(['available']), 'available');
+  assert.equal(resolveModelListCommand(['respond']), null);
 });
 
 test('detectFmCapabilities recognises a legacy token-count command', async () => {
@@ -110,7 +154,7 @@ test('detectFmCapabilities reports token counting unavailable instead of guessin
 
 test('detectFmCapabilities detects optional flags and quota support', async () => {
   const withQuota = await detectFmCapabilities(fakeFmPath(), {
-    env: { ...process.env, FAKE_FM_SCENARIO: 'quota' }
+    env: { ...process.env, FAKE_FM_SCENARIO: 'normal' }
   });
   assert.equal(withQuota.features.quota, true);
   assert.ok(withQuota.commands.includes('quota-usage'));
@@ -156,7 +200,7 @@ test('parseModelsFromHelp does not invent cloud models', () => {
   assert.deepEqual(models.map((model) => model.name), ['system']);
 });
 
-test('detectFmCapabilities falls back to fm available when help has no MODELS section', async () => {
+test('detectFmCapabilities falls back to fm models when help has no MODELS section', async () => {
   const capabilities = await detectFmCapabilities(fakeFmPath(), {
     env: { ...process.env, FAKE_FM_SCENARIO: 'no-models-section' }
   });

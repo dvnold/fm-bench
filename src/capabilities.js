@@ -9,7 +9,7 @@
 
 import crypto from 'node:crypto';
 import { stripAnsi } from './ansi.js';
-import { parseAvailabilityList, parseModelsFromHelp } from './fm-help.js';
+import { parseAvailabilityList, parseModelList, parseModelsFromHelp } from './fm-help.js';
 import { runProcess } from './process.js';
 
 const SECTION_HEADER = /^\s*[A-Z][A-Z0-9 /-]+\s*$/;
@@ -72,12 +72,26 @@ export function resolveTokenCountCommand(commands = []) {
   return null;
 }
 
+/**
+ * Pick the subcommand this `fm` build uses to report model availability.
+ * macOS 27.2 renamed `available` to `models`; the old name still works there
+ * but prints a deprecation warning, so prefer the new one.
+ * @returns {'models'|'available'|null}
+ */
+export function resolveModelListCommand(commands = []) {
+  if (commands.includes('models')) return 'models';
+  if (commands.includes('available')) return 'available';
+  return null;
+}
+
 function buildFeatures(helpText, respondHelpText, commands) {
   const tokenCountCommand = resolveTokenCountCommand(commands);
   const respondHelp = respondHelpText || '';
   return {
     tokenCounting: tokenCountCommand != null,
     tokenCountCommand,
+    modelListCommand: resolveModelListCommand(commands),
+    license: commands.includes('license'),
     quota: commands.includes('quota-usage'),
     streaming: hasFlagInHelp(respondHelp, '--no-stream') || hasFlagInHelp(respondHelp, '--stream'),
     modelSelection: hasFlagInHelp(respondHelp, '--model'),
@@ -153,8 +167,8 @@ export async function detectFmCapabilities(fmBin, options = {}) {
   const features = buildFeatures(cleanHelp, respondHelpText, commands);
   let models = parseModelsFromHelp(cleanHelp);
 
-  if (models.length === 0 && commands.includes('available')) {
-    models = await discoverModelsFromAvailability(fmBin, { ...options, env });
+  if (models.length === 0 && features.modelListCommand) {
+    models = await discoverModelsFromList(fmBin, features.modelListCommand, { ...options, env });
   }
 
   return {
@@ -170,17 +184,20 @@ export async function detectFmCapabilities(fmBin, options = {}) {
 }
 
 /**
- * Fallback discovery: ask `fm available` without a model filter and read the
- * model names it reports. Used when `fm --help` has no MODELS section.
+ * Fallback discovery: ask `fm models` (or legacy `fm available`) without a
+ * model filter and read the model names it reports. Used when `fm --help` has
+ * no MODELS section.
  */
-async function discoverModelsFromAvailability(fmBin, options = {}) {
-  const result = await runProcess(fmBin, ['available'], {
+async function discoverModelsFromList(fmBin, command, options = {}) {
+  const result = await runProcess(fmBin, [command], {
     timeoutMs: options.timeoutMs ?? 15_000,
     env: options.env ?? process.env
   });
   if (result.error) return [];
-  return parseAvailabilityList(`${result.stdout}${result.stderr}`)
-    .map((model) => ({ name: model.name, description: '' }));
+  const output = `${result.stdout}${result.stderr}`;
+  const listed = parseModelList(output);
+  const models = listed.length > 0 ? listed : parseAvailabilityList(output);
+  return models.map((model) => ({ name: model.name, description: '' }));
 }
 
 function escapeRegExp(value) {

@@ -1,7 +1,8 @@
 # fm-bench
 
-[![CI](https://github.com/devinoldenburg/fm-bench/actions/workflows/ci.yml/badge.svg)](https://github.com/devinoldenburg/fm-bench/actions/workflows/ci.yml)
+[![CI](https://github.com/dvnold/fm-bench/actions/workflows/ci.yml/badge.svg)](https://github.com/dvnold/fm-bench/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/fm-bench.svg)](https://www.npmjs.com/package/fm-bench)
+[![node](https://img.shields.io/node/v/fm-bench.svg)](https://nodejs.org/)
 
 Benchmark Apple's `fm` command on macOS 27+.
 
@@ -30,28 +31,27 @@ npm install -g fm-bench
 fm-bench
 ```
 
-One command discovers your models, runs the standard prompt suite, and prints a full benchmark report (real output from a macOS 27.0 Apple M5 Pro):
+One command discovers your models, warms each one up, runs the standard prompt suite, and prints a full benchmark report. Real output of `fm-bench --runs 3` on macOS 27.2 (26B5091g), Apple M5 Pro:
 
 ```text
-fm-bench 0.7.0 | darwin/arm64 | fm
-prompts 3 | runs 3 | concurrency 1 | stream on | measured 9 | failed 0 | skipped 0 | elapsed 6.37s | SLO
-TTFT<=1.00s,E2E<=3.00s
-unavailable: quota unavailable — this fm build exposes no quota command
+fm-bench 0.8.0 | darwin/arm64 | fm
+prompts 3 | runs 3 | concurrency 1 | stream on | measured 9 | failed 0 | skipped 0 | elapsed 11.07s
+models: system = AFM 3 Core Advanced
 
-┌───┬────────┬────────┬─────┬──────┬──────────┬───────┬───────┬─────────┬────────┬───────┬─────┬──────┐
-│ C │ MODEL  │ STATUS │ OK  │ GOOD │ GOOD RPS │ TTFT  │ E2E   │ E2E P95 │ USER/S │ SYS/S │ CV  │ NOTE │
-├───┼────────┼────────┼─────┼──────┼──────────┼───────┼───────┼─────────┼────────┼───────┼─────┼──────┤
-│ 1 │ system │ ok     │ 9/9 │ 100% │      1.7 │ 377ms │ 487ms │   749ms │   34.0 │  32.8 │ 25% │      │
-└───┴────────┴────────┴─────┴──────┴──────────┴───────┴───────┴─────────┴────────┴───────┴─────┴──────┘
+┌───┬────────┬────────┬─────┬───────┬───────┬─────────┬────────┬───────┬────┬──────┐
+│ C │ MODEL  │ STATUS │ OK  │ TTFT  │ E2E   │ E2E P95 │ USER/S │ SYS/S │ CV │ NOTE │
+├───┼────────┼────────┼─────┼───────┼───────┼─────────┼────────┼───────┼────┼──────┤
+│ 1 │ system │ ok     │ 9/9 │ 620ms │ 687ms │   1.43s │   40.6 │  37.7 │ 3% │      │
+└───┴────────┴────────┴─────┴───────┴───────┴─────────┴────────┴───────┴────┴──────┘
 
 ┌───┬────────┬────────┬─────────┬───────────┬──────────┬───────────┬─────────┬────────┐
 │ C │ MODEL  │ IN AVG │ OUT AVG │ PREFILL/S │ DECODE/S │ CHUNK P95 │ E2E P99 │ REPEAT │
 ├───┼────────┼────────┼─────────┼───────────┼──────────┼───────────┼─────────┼────────┤
-│ 1 │ system │     13 │      20 │      35.9 │      113 │     197ms │   749ms │   100% │
+│ 1 │ system │     27 │      38 │      40.7 │     78.1 │     197ms │   1.45s │   100% │
 └───┴────────┴────────┴─────────┴───────────┴──────────┴───────────┴─────────┴────────┘
 ```
 
-Default profile is `standard` (3 prompts). Use `--runs 5`, `--sweep-concurrency 1,2`, or `--profile client` for heavier suites.
+Default profile is `standard` (3 prompts) with one run each, so run-to-run CV shows `-` until you pass `--runs 2` or more. Use `--runs 5`, `--sweep-concurrency 1,2`, or `--profile client` for heavier suites. When a model is unavailable (for example `pcc` outside the Terminal app), it is listed as skipped with fm's reason; `--available-only` hides it.
 
 Wide terminals add TTFT P95, TPOT, and RPS columns; medium terminals tighten the table; narrow terminals switch to compact model cards automatically. `--width <n>` previews any layout.
 
@@ -64,7 +64,7 @@ npm install -g fm-bench
 Install directly from GitHub (always latest):
 
 ```sh
-npm install -g --install-links git+https://github.com/devinoldenburg/fm-bench.git
+npm install -g --install-links git+https://github.com/dvnold/fm-bench.git
 ```
 
 Local development:
@@ -74,23 +74,25 @@ npm install && npm link
 fm-bench doctor   # verify your setup
 ```
 
-**Requirements:** macOS 27+, Node.js 20+, Apple Intelligence enabled.
+**Requirements:** macOS 27+, Node.js 22+, Apple Intelligence enabled.
 
 ## Commands
 
 | Command | What it does |
 |---------|-------------|
 | `fm-bench` | Run the full benchmark (default) |
-| `fm-bench models` | Show the detected `fm` capabilities, discovered models, availability, and quota when supported |
+| `fm-bench models` | Show the detected `fm` capabilities, discovered models, their identity (for example `AFM 3 Core Advanced`), availability, and quota |
 | `fm-bench compare <a.json> <b.json>` | Regression diff with suite/hardware/macOS warnings; `--strict` exits 2 when suites differ |
 | `fm-bench history [dir]` | Trend table from saved reports (sorted by time, tags visible) |
 | `fm-bench validate <report.json>` | Verify report JSON (schema v1) before sharing; `--json` for CI |
 | `fm-bench export <report.json>` | Standalone HTML report with embedded JSON |
 | `fm-bench legend` | Definitions, provenance (measured/proxy/derived), and color rules for every column |
-| `fm-bench doctor` | Environment and `fm` capability check; `--json` for scripts |
+| `fm-bench doctor` | Environment, `fm` license, and capability check; `--json` for scripts |
 | `fm-bench metrics` | Alias for `legend` |
 
 Exit codes: `0` success, `1` operational failure (failed `--ci` gate, invalid reports), `2` usage or environment error (bad flags, unsupported macOS, unusable `fm`, no runnable model). Interrupting a run with Ctrl+C terminates in-flight `fm` processes.
+
+Mistyped commands and flags are caught with a suggestion (`Unknown command "modles". Did you mean "models"?`) instead of being benchmarked as a prompt. To benchmark such a word anyway, put it after `--`.
 
 ## Common Recipes
 
@@ -130,7 +132,7 @@ fm-bench --format csv --out bench.csv
 |------|---------|-------------|
 | `-m, --models <list>` | discovered | Comma-separated or repeated model names |
 | `-r, --runs <n>` | 1 | Measured runs per prompt/model |
-| `--warmup <n>` | 0 | Unmeasured warmup runs per model before measurement |
+| `--warmup <n>` | 1 | Unmeasured warmup runs per model before measurement; `0` measures cold start |
 | `-c, --concurrency <n>` | 1 | Parallel `fm` processes |
 | `--sweep-concurrency <list>` | — | Separate operating points, e.g. `1,2,4` |
 | `--request-rate <rps>` | — | Pace request starts at a target rate |
@@ -200,13 +202,15 @@ Nine built-in suites, choose the one that matches your use case:
 
 ## Metrics
 
-**Latency** — TTFT (p50/p95), E2E (p50/p95/p99), TPOT, 95% confidence interval, coefficient of variation (CV).
+**Latency** — TTFT (p50/p95), E2E (p50/p95/p99), TPOT, 95% confidence interval, and run-to-run CV (per prompt across repeated runs, so mixing short and long prompts does not read as instability).
 
 **Throughput** — prefill tokens/s, decode tokens/s, output tokens/s per request, aggregate system tokens/s, requests per second.
 
-**Streaming quality** — second-chunk delay, chunk-gap p95, captured from stdout chunk arrival during streaming runs.
+**Streaming quality** — first-chunk tokens, second-chunk delay, chunk-gap p95, captured from stdout chunk arrival during streaming runs.
 
 **Reliability** — success rate, goodput rate and RPS against SLO budgets, repeatability (most common output hash frequency across repeated runs).
+
+**Model identity** — the identity `fm models` reports (for example `system = AFM 3 Core Advanced`) is printed in the report header and saved in JSON, and `compare` warns when the model behind a name changed between two runs.
 
 Every metric is labelled by provenance in JSON and in `fm-bench legend`:
 
@@ -214,13 +218,16 @@ Every metric is labelled by provenance in JSON and in `fm-bench legend`:
 - **proxy** — TTFT and chunk gaps (chunk granularity, not token timestamps); prefill tokens/s
 - **derived** — TPOT, decode tokens/s, throughput, CV, confidence intervals, goodput
 
-Token counts come from the `fm` build's own token-counting command (`count-tokens`, or `token-count` on older builds). If the build cannot count tokens, token metrics render as `-`, JSON carries `null`, and `metrics.promptTokens.available` is `false`. Spread statistics (`CV`, 95% CI) need at least two successful samples; with one sample they are unavailable rather than `0`. See [docs/methodology.md](docs/methodology.md).
+Token counts come from the `fm` build's own token-counting command (`count-tokens`, or `token-count` on older builds). `count-tokens` adds one framing token to every count; fm-bench calibrates that overhead once per run and removes it from output counts (`tokenCounter` in JSON). If the build cannot count tokens, token metrics render as `-`, JSON carries `null`, and `metrics.promptTokens.available` is `false`. Spread statistics (`CV`, 95% CI) need at least two successful samples; with one sample they are unavailable rather than `0`.
+
+`fm` streams coarse deltas — on macOS 27.2 the first stdout chunk carries about 20 tokens — so TTFT is time to the first chunk, and TPOT and decode tokens/s are computed only over the tokens that arrive after it. See [docs/methodology.md](docs/methodology.md).
 
 ## fm compatibility
 
 `fm-bench` probes `fm --help` and `fm respond --help` once per run and adapts:
 
-- Subcommand names (`count-tokens` vs legacy `token-count`) are detected, not hardcoded.
+- Subcommand names (`count-tokens` vs legacy `token-count`, `models` vs the deprecated `available`) are detected, not hardcoded.
+- Model availability and identity come from one `fm models` call; reasons such as `Private Cloud Compute is not available in this context. Please use the Terminal app.` are shown in full.
 - Flags the build does not document (`--stream`, `--use-case`, `--guardrails`, `--model`) are not passed through.
 - Unsupported models are rejected before a benchmark starts, with the supported list in the error.
 - Raw `fm` argument-error text never reaches reports, tables, or JSON.
@@ -293,8 +300,9 @@ fm-bench legend --json   # machine-readable
 ## Requirements
 
 - macOS 27.0 or newer (Apple's `fm` CLI is preinstalled there).
-- Node.js 20 or newer.
-- Apple Intelligence enabled on the device.
+- Node.js 22 or newer (CI covers Node 22, 24, and 26).
+- Apple Intelligence enabled on the device, and the `fm` terms accepted once with `fm license` (`fm-bench doctor` checks this).
+- To benchmark the Private Cloud Compute model (`pcc`), run fm-bench from the Terminal app: `fm` reports `pcc` as unavailable in other contexts such as editor terminals.
 
 Benchmark commands refuse to start on older macOS versions and report the detected version plus the latest supported macOS — see [docs/supported-platforms.md](docs/supported-platforms.md).
 

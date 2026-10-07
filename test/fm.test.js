@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAvailabilityOutput, parseModelsFromHelp } from '../src/fm.js';
+import { DELIVERY_COALESCE_MS, groupDeliveries, parseAvailabilityOutput, parseModelsFromHelp } from '../src/fm.js';
 
 test('parseModelsFromHelp extracts models from fm help', () => {
   const models = parseModelsFromHelp(`
@@ -28,4 +28,17 @@ test('parseAvailabilityOutput treats explicit errors as unavailable', () => {
 test('parseAvailabilityOutput detects available model line', () => {
   const parsed = parseAvailabilityOutput('system', 'System model available', 0);
   assert.equal(parsed.available, true);
+});
+
+test('groupDeliveries merges write bursts under 5 ms and keeps real stream steps apart', () => {
+  // Shape captured from real fm on macOS 27.2: first chunk, a real 54 ms
+  // delta, then the tail written as a burst 0.11 ms later.
+  const deliveries = groupDeliveries([680, 734, 734.11], [90, 30, 2]);
+  assert.deepEqual(deliveries, [
+    { atMs: 680, endChars: 90 },
+    { atMs: 734, endChars: 122 }
+  ]);
+  assert.deepEqual(groupDeliveries([500, 500.04, 500.5], [40, 20, 1]), [{ atMs: 500, endChars: 61 }]);
+  assert.deepEqual(groupDeliveries([], []), []);
+  assert.equal(DELIVERY_COALESCE_MS, 5);
 });

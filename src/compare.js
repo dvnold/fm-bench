@@ -77,8 +77,17 @@ function buildDiffRow(key, before, after) {
     goodputRate: diffPercent(before?.goodputRate, after?.goodputRate),
     tokensPerSecond: diffNumber(before?.tokensPerSecond?.avg, after?.tokensPerSecond?.avg, false),
     rps: diffNumber(before?.rps, after?.rps, false),
-    cv: diffPercent(before?.latency?.cv, after?.latency?.cv)
+    cv: diffPercent(...comparableCv(before, after))
   };
+}
+
+// Compare the run-to-run CV only when both reports carry it; otherwise fall
+// back to the suite-wide latency CV on both sides so the definitions match.
+function comparableCv(before, after) {
+  const bothStable = before && after && Object.hasOwn(before, 'stabilityCv') && Object.hasOwn(after, 'stabilityCv');
+  return bothStable
+    ? [before.stabilityCv, after.stabilityCv]
+    : [before?.latency?.cv, after?.latency?.cv];
 }
 
 function diffMs(before, after) {
