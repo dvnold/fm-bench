@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.8.0
+
+macOS 27.2 support and a measurement-accuracy release, verified against the real `fm` on macOS 27.2 (26B5091g), Apple M5 Pro. Decode metrics, output token counts, and the CV column change meaning (see below), so compare 0.8.0 reports with each other rather than with 0.7.x. The report schema stays at v1; all new fields are additive.
+
+### macOS 27.2 `fm` support
+
+- **Model availability now comes from `fm models`.** macOS 27.2 renamed `fm available` to `fm models` and deprecated the old name. In 0.7.x, `system` only showed as available because the word "available" in the deprecation warning happened to sit next to the model name. fm-bench now makes one `fm models` call for all models, reads its `✓`/`✗` list, falls back to `fm available` on 27.0, and drops `warning:` lines before parsing any `fm` output.
+- **Model identity.** The identity `fm models` reports (for example `system = AFM 3 Core Advanced`) is shown in `fm-bench models` (new IDENTITY column), in `doctor`, and in the report header, and saved as `models[].identity` and `suite.fingerprint.modelIdentities`. `compare` warns when the model behind a name changes, for example after a macOS update.
+- **Full unavailability reasons.** Reasons such as `Private Cloud Compute is not available in this context. Please use the Terminal app.` are no longer cut off before the hint. The help text and docs explain that `pcc` is only served to the Terminal app.
+- The no-runnable-model error now lists the models the build actually reports (`system, pcc`) instead of repeating the request.
+- `fm-bench models` no longer queries quota for a model the build does not have, which used to hide the "not supported" reason behind another model's quota text.
+- `doctor` checks `fm license --status` and tells you to run `fm license` when the terms have not been accepted; `fm respond` cannot run until they are.
+- New fixtures captured from the real macOS 27.2 `fm` (`--help`, `respond --help`, `models`, `quota-usage`, deprecated `available`, `license --status`). The fake `fm` now mirrors 27.2 by default, and `FAKE_FM_SCENARIO=legacy-available` keeps the 27.0 surface covered.
+
+### Measurement accuracy
+
+- **Decode speed and TPOT were overstated.** `fm` streams coarse deltas: on macOS 27.2 the first stdout chunk always carries about 20 tokens (the same through a pseudo-terminal and through `fm serve`). 0.7.x divided the post-first-chunk time by `output tokens - 1`, crediting those ~20 tokens to the decode window. TPOT and decode tokens/s now use only the tokens that arrived after the first chunk (`firstChunkTokens`, counted per run), and the generation window ends at the last chunk instead of at process exit. On the real machine, the decode rate for a 60-token answer went from ~99 to ~66 tokens/s.
+- **Write bursts are no longer decode steps.** `fm` writes the tail of a short answer as several writes well under 1 ms apart, which produced decode rates above 10,000 tokens/s on the `interactive` profile. Chunks that arrive less than 5 ms apart now count as one delivery. Generation time, TPOT, decode rate, second-chunk delay, and chunk gaps use deliveries; a short answer delivered in one burst reports no decode rate rather than an absurd one. Long generations measure about 51–53 tokens/s on an M5 Pro.
+- **DECODE/S is token-weighted.** The column now shows `decodeThroughput` (decode tokens summed over runs ÷ summed generation time) instead of the plain mean of per-run rates, so a three-token tail can no longer outweigh a 200-token generation. Per-run `decodeTokensPerSecond` and its summary statistics are unchanged in JSON.
+- **Output token counts were one too high.** `fm count-tokens` adds one framing token to every count (`a` → 2, `a a` → 3). fm-bench calibrates the overhead once per run and removes it from output counts. The result is recorded as `tokenCounter: { command, overhead, calibrated }`. Prompt token counts stay exactly as `fm` reports them.
+- **CV now measures stability.** The CV column was computed over every sample in a row, so a suite that mixes short and long prompts showed 25–45% "variation" even when every prompt was steady. It now shows run-to-run CV per prompt, averaged over prompts (`stabilityCv`). On the real machine that changed 42% to 2%. It shows `-` until a prompt has two runs; the pooled `latency.cv` is still in the JSON.
+- **One warmup by default.** The first call after a cold start includes model load time, which inflated p95/p99 and CV on default runs. `--warmup` now defaults to `1`; pass `--warmup 0` to measure cold start deliberately.
+- The wide detail table adds a `1ST CHUNK` column, and per-run CSV appends a `first_chunk_tokens` column at the end so positional readers keep working.
+
+### CLI experience
+
+- A mistyped command is refused with a suggestion instead of being benchmarked as a prompt (`Unknown command "modles". Did you mean "models"?`); `fm-bench -- modles` still benchmarks the word. Unknown flags suggest the closest real one (`--rnus` → `--runs`).
+- `doctor` output aligns long check names.
+- Removed an inline dynamic import in the HTML report writer.
+
+### Platform, CI, and release
+
+- **Node.js 22+ is required.** Node 20 reached end of life in April 2026. CI now tests Node 22, 24, and 26, and smoke-tests both the macOS 27.2 and 27.0 `fm` surfaces.
+- The repository moved to `dvnold/fm-bench`. Package metadata, links, and release notes now point there, which npm provenance requires.
+- The Release workflow runs on Node 24 (npm 11) and supports **npm trusted publishing** (OIDC), with the `NPM_TOKEN` secret as a fallback. When publishing fails, it still writes the GitHub release notes and then fails visibly instead of passing silently. After publishing, it installs the package from the registry and runs it.
+- The Version workflow now dispatches Release itself; a tag pushed with `GITHUB_TOKEN` never triggered it.
+- Workflows use least-privilege `permissions`, SHA-pinned actions, job timeouts, no dependency cache in publish jobs, and a single `ci` status job.
+
 ## 0.7.2
 
 Reliability fixes found while re-auditing interruption and fail-fast behaviour; no change to metrics or the report schema.
