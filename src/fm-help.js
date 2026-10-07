@@ -61,13 +61,54 @@ export function parseModelsFromHelp(helpText = '') {
 }
 
 /**
+ * Read `fm models` output (macOS 27.2+), one model per line:
+ *
+ *   Apple Foundation Models
+ *     ✓ system (AFM 3 Core Advanced)
+ *     ✗ pcc    (Private Cloud Compute is not available in this context. ...)
+ *
+ * The parenthesised text is the model identity for an available model and
+ * the reason for an unavailable one.
+ * @param {string} output
+ * @returns {{ name: string, available: boolean, identity: string, reason: string }[]}
+ */
+export function parseModelList(output = '') {
+  const models = new Map();
+  for (const line of withoutWarnings(output).split(/\r?\n/)) {
+    const match = line.match(/^\s*([✓✔✗✘×])\s+([A-Za-z0-9][A-Za-z0-9._:/-]*)\s*(?:\((.*)\))?\s*$/);
+    if (!match) continue;
+    const available = match[1] === '✓' || match[1] === '✔';
+    const detail = (match[3] ?? '').trim();
+    models.set(match[2], {
+      name: match[2],
+      available,
+      identity: available ? detail : '',
+      reason: available ? '' : detail
+    });
+  }
+  return [...models.values()];
+}
+
+/**
+ * Drop `warning:` lines (for example the `fm available` rename notice) so
+ * they are never mistaken for a model status or an error cause.
+ * @param {string} text
+ */
+export function withoutWarnings(text = '') {
+  return stripAnsi(text)
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*warning:/i.test(line))
+    .join('\n');
+}
+
+/**
  * Read model names and availability out of `fm available` (no model filter).
  * @param {string} output
  * @returns {{ name: string, available: boolean }[]}
  */
 export function parseAvailabilityList(output = '') {
   const models = new Map();
-  for (const line of stripAnsi(output).split(/\r?\n/)) {
+  for (const line of withoutWarnings(output).split(/\r?\n/)) {
     const match = line.match(/^\s*([A-Za-z][A-Za-z0-9._-]*)(?:\s+model)?\s+(?:is\s+)?(available|unavailable|not available)\b/i);
     if (!match) continue;
     const name = match[1].toLowerCase();
@@ -88,7 +129,17 @@ export function parseAvailabilityList(output = '') {
  * @param {number|null} code process exit code
  */
 export function parseAvailabilityOutput(model, output = '', code = null) {
-  const clean = stripAnsi(output).trim();
+  const clean = withoutWarnings(output).trim();
+  const listed = parseModelList(clean).find((entry) => entry.name === model);
+  if (listed) {
+    return {
+      model,
+      available: listed.available,
+      identity: listed.identity,
+      raw: clean,
+      reason: listed.reason
+    };
+  }
   const lower = clean.toLowerCase();
   const modelLower = String(model).toLowerCase();
   const hasError = /\berror:|\bunavailable\b|\bnot available\b|\bnot supported\b|\bis invalid for\b/.test(lower);
@@ -106,14 +157,18 @@ export function parseAvailabilityOutput(model, output = '', code = null) {
 
 /**
  * Collapse `fm` diagnostics into one actionable line. `fm` writes multi-line
- * usage blocks for argument errors; benchmark output only needs the cause.
+ * usage blocks for argument errors and `warning:` notices; benchmark output
+ * only needs the line that states the cause (including any hint on it, such
+ * as "Please use the Terminal app.").
  * @param {string} text
  */
 export function firstLine(text = '') {
-  const clean = stripAnsi(text).replace(/\s+/g, ' ').trim();
-  if (!clean) return '';
-  const sentences = clean.split(/(?<=\.)\s+(?=[A-Z])/);
-  const head = sentences.find((part) => /error|invalid|unavailable|not supported|failed/i.test(part)) || sentences[0];
+  const lines = withoutWarnings(text)
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line) => line && !/^(usage|help|see)\b/i.test(line));
+  if (lines.length === 0) return '';
+  const head = lines.find((line) => /error|invalid|unavailable|not available|not supported|failed/i.test(line)) || lines[0];
   return head.replace(/^Error:\s*/i, '').trim();
 }
 

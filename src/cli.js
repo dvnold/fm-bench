@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { inspectModels, runBenchmark } from './bench.js';
 import { diffReports, renderCompareReport } from './compare.js';
 import { renderHtmlReport } from './export.js';
+import { getLicenseStatus } from './fm.js';
 import { formatCapabilitySummary } from './metrics.js';
 import { validateReport } from './schema.js';
 import { loadHistory, renderHistoryReport } from './history.js';
@@ -28,6 +29,53 @@ function operationalError(message) {
   const error = new Error(message);
   error.exitCode = 1;
   return error;
+}
+
+// One unmeasured call per model absorbs the cold model load, which otherwise
+// dominates the first measured run (several hundred ms on Apple silicon).
+const DEFAULT_WARMUP = 1;
+
+const COMMANDS = ['run', 'models', 'doctor', 'legend', 'metrics', 'compare', 'history', 'validate', 'export', 'help'];
+
+const KNOWN_OPTIONS = [
+  '--help', '--version', '--model', '--models', '--runs', '--warmup', '--concurrency', '--sweep-concurrency',
+  '--request-rate', '--ramp-up-ms', '--timeout', '--timeout-ms', '--slo-ttft-ms', '--slo-e2e-ms', '--slo-tpot-ms',
+  '--prompt', '--prompt-file', '--profile', '--instructions', '--fm-bin', '--use-case', '--guardrails',
+  '--greedy', '--no-greedy', '--stream', '--no-stream', '--json', '--csv', '--format', '--ascii', '--color',
+  '--no-color', '--progress', '--no-progress', '--compact', '--width', '--histogram', '--export-html', '--strict',
+  '--out', '--output-dir', '--capture-output', '--available-only', '--fail-fast', '--retry', '--ci', '--tag',
+  '--note', '--verbose'
+];
+
+/** Closest candidate within a small edit distance, or null. */
+function closestMatch(input, candidates) {
+  let best = null;
+  let bestDistance = Infinity;
+  for (const candidate of candidates) {
+    const distance = editDistance(input, candidate);
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  const limit = input.replace(/^-+/, '').length <= 6 ? 1 : 2;
+  return bestDistance > 0 && bestDistance <= limit ? best : null;
+}
+
+/** Optimal string alignment distance: an adjacent swap counts as one edit. */
+function editDistance(a, b) {
+  const rows = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j += 1) rows[0][j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      rows[i][j] = Math.min(rows[i - 1][j] + 1, rows[i][j - 1] + 1, rows[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        rows[i][j] = Math.min(rows[i][j], rows[i - 2][j - 2] + 1);
+      }
+    }
+  }
+  return rows[a.length][b.length];
 }
 
 export async function runCli(argv = process.argv.slice(2), env = {}) {
@@ -230,7 +278,7 @@ export function parseArgs(argv) {
     models: [],
     prompts: [],
     runs: 1,
-    warmup: 0,
+    warmup: DEFAULT_WARMUP,
     concurrency: 1,
     sweepConcurrency: [],
     requestRate: null,
@@ -263,8 +311,15 @@ export function parseArgs(argv) {
   };
 
   const args = [...argv];
-  if (args[0] && !args[0].startsWith('-') && ['run', 'models', 'doctor', 'legend', 'metrics', 'compare', 'history', 'validate', 'export', 'help'].includes(args[0])) {
+  if (args[0] && !args[0].startsWith('-') && COMMANDS.includes(args[0])) {
     options.command = args.shift();
+  } else if (args[0] && /^[a-z]{3,}$/.test(args[0])) {
+    // A bare word is a prompt, but one that is a near miss for a command is
+    // almost always a typo; benchmarking "modles" as a prompt helps nobody.
+    const suggestion = closestMatch(args[0], COMMANDS);
+    if (suggestion) {
+      throw usageError(`Unknown command "${args[0]}". Did you mean "${suggestion}"? To benchmark it as a prompt, use: fm-bench -- ${args[0]}`);
+    }
   }
 
   if (options.command === 'metrics') {
@@ -447,7 +502,8 @@ export function parseArgs(argv) {
         break;
       default:
         if (arg.startsWith('-')) {
-          throw usageError(`Unknown option: ${arg}`);
+          const suggestion = arg.startsWith('--') ? closestMatch(arg, KNOWN_OPTIONS) : null;
+          throw usageError(`Unknown option: ${arg}${suggestion ? `. Did you mean ${suggestion}?` : ''} (see fm-bench --help)`);
         }
         if (options.command === 'compare') {
           options.compareFiles.push(arg);
@@ -665,8 +721,17 @@ async function runDoctor(options) {
     checks.push(['fm token counting', capabilities.features.tokenCounting ? `yes (${capabilities.features.tokenCountCommand})` : 'no', capabilities.features.tokenCounting]);
     checks.push(['fm streaming', capabilities.features.streaming ? 'yes' : 'no', capabilities.features.streaming]);
     checks.push(['fm quota', capabilities.features.quota ? 'yes' : 'no (not exposed by this build)', true]);
+    if (capabilities.features.license) {
+      const license = await getLicenseStatus(inspection.fmBin, { capabilities });
+      checks.push(['fm license', license.agreed === false
+        ? `${license.detail || 'not agreed'} — run "fm license" to review and accept the terms`
+        : license.detail, license.agreed !== false]);
+    }
     for (const model of inspection.models) {
-      checks.push([`model:${model.name}`, model.available ? 'available' : model.reason || 'unavailable', model.available]);
+      const detail = model.available
+        ? `available${model.identity ? ` (${model.identity})` : ''}`
+        : model.reason || 'unavailable';
+      checks.push([`model:${model.name}`, detail, model.available]);
     }
   } catch (error) {
     checks.push(['fm', error.message || String(error), false]);
@@ -681,7 +746,8 @@ async function runDoctor(options) {
   if (json) {
     console.log(JSON.stringify(payload, null, 2));
   } else {
-    const lines = checks.map(([name, detail, ok]) => `${ok ? 'ok  ' : 'warn'} ${name.padEnd(16)} ${String(detail).replace(/\s+/g, ' ').trim()}`);
+    const nameWidth = Math.max(...checks.map(([name]) => name.length));
+    const lines = checks.map(([name, detail, ok]) => `${ok ? 'ok  ' : 'warn'} ${name.padEnd(nameWidth)}  ${String(detail).replace(/\s+/g, ' ').trim()}`);
     console.log(lines.join('\n'));
     if (capabilities) {
       console.log('');
@@ -795,7 +861,7 @@ Commands:
 Run options:
   -m, --models <list>       Models to benchmark, comma-separated or repeated
   -r, --runs <n>            Runs per prompt/model (default: 1)
-      --warmup <n>          Warmup runs per model before measurement
+      --warmup <n>          Unmeasured warmup runs per model (default: 1; 0 measures cold start)
   -c, --concurrency <n>     Parallel fm processes (default: 1)
       --sweep-concurrency <list>
                             Run separate operating points, e.g. 1,2,4
@@ -859,9 +925,15 @@ Exit codes:
   2   usage or environment error (bad flags, missing arguments, unsupported macOS, fm not found)
 
 Capability detection:
-  fm-bench probes "fm --help" and "fm respond --help" once per run. Metrics the
-  installed fm cannot supply are reported as unavailable instead of being
+  fm-bench probes "fm --help" and "fm respond --help" once per run and reads
+  model status from "fm models" (or "fm available" on older builds). Metrics
+  the installed fm cannot supply are reported as unavailable instead of being
   guessed, and unsupported models are refused before any benchmark starts.
+
+Private Cloud Compute:
+  fm reports the pcc model as "not available in this context" outside the
+  Terminal app (for example in editor terminals). Run fm-bench from Terminal
+  to benchmark pcc; elsewhere it is listed as skipped with that reason.
 
 Examples:
   fm-bench

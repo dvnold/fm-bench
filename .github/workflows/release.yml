@@ -7,30 +7,38 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to publish, for example v0.5.3"
+        description: "Existing tag to publish, for example v0.8.0"
         required: true
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   publish:
     runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      # id-token: npm trusted publishing (OIDC) and provenance attestations.
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      # Node 24 ships npm 11, which publishes through npm trusted publishing
+      # (OIDC) when the package trusts this workflow, and falls back to
+      # NODE_AUTH_TOKEN otherwise. No dependency cache in a publish job.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org/
-          cache: npm
 
       - run: npm ci
       - name: Lint, test, and verify package contents
@@ -38,65 +46,84 @@ jobs:
 
       - name: Resolve release version
         id: version
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            ver="${{ github.event.inputs.tag }}"
-          else
-            ver="${GITHUB_REF_NAME}"
-          fi
+          ver="${INPUT_TAG:-$GITHUB_REF_NAME}"
           ver="${ver#v}"
           echo "semver=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
           echo "Release version: $ver"
 
       - name: Verify package.json matches tag
+        env:
+          EXPECTED: ${{ steps.version.outputs.semver }}
         run: |
           set -euo pipefail
-          expected="${{ steps.version.outputs.semver }}"
-          actual="$(node --eval "import { readFileSync } from 'node:fs'; console.log(JSON.parse(readFileSync('package.json','utf8')).version)")"
-          if [ "$actual" != "$expected" ]; then
-            echo "package.json version ($actual) does not match tag ($expected)"
+          actual="$(node -p "require('./package.json').version")"
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::package.json version ($actual) does not match tag ($EXPECTED)"
             exit 1
           fi
 
       - name: Publish to npm
         id: npm
+        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.semver }}
         run: |
           set -euo pipefail
-          ver="${{ steps.version.outputs.semver }}"
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "::warning::NPM_TOKEN is not configured — skipping npm publish. The GitHub release still runs."
-            echo "status=skipped-no-token" >> "$GITHUB_OUTPUT"
+          npm --version
+          if npm view "fm-bench@${VERSION}" version 2>/dev/null | grep -qx "$VERSION"; then
+            echo "fm-bench@${VERSION} is already on npm — skipping publish."
+            echo "status=already-published" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if npm view "fm-bench@${ver}" version 2>/dev/null | grep -qx "$ver"; then
-            echo "fm-bench@${ver} is already on npm — skipping publish."
-            echo "status=already-published" >> "$GITHUB_OUTPUT"
-          else
-            npm publish --access public --provenance
-            echo "status=published" >> "$GITHUB_OUTPUT"
-          fi
+          npm publish --access public --provenance
+          echo "status=published" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.semver }}
+          NPM_OUTCOME: ${{ steps.npm.outcome }}
         run: |
           set -euo pipefail
-          tag="$RELEASE_TAG"
-          ver="${tag#v}"
-          notes="$(node scripts/changelog-release-notes.mjs "$ver")"
           notes_file="$(mktemp)"
-          printf '%s' "$notes" >> "$notes_file"
-          printf '\n' >> "$notes_file"
-          if [ "${{ steps.npm.outputs.status }}" = "skipped-no-token" ]; then
-            printf '\nnpm publish status: skipped (NPM_TOKEN not configured in this repository).\n' >> "$notes_file"
+          node scripts/changelog-release-notes.mjs "$VERSION" > "$notes_file"
+          if [ "$NPM_OUTCOME" != "success" ]; then
+            printf '\n> npm publish failed for this tag. See docs/releasing.md to configure trusted publishing, then re-run the Release workflow for %s.\n' "$TAG" >> "$notes_file"
           fi
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "GitHub release $tag already exists — updating notes from CHANGELOG.md."
-            gh release edit "$tag" --notes-file "$notes_file" --title "$tag"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub release $TAG already exists — updating notes from CHANGELOG.md."
+            gh release edit "$TAG" --notes-file "$notes_file" --title "$TAG"
           else
-            gh release create "$tag" --verify-tag --title "$tag" --notes-file "$notes_file"
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$notes_file"
           fi
           rm -f "$notes_file"
+
+      - name: Fail the release when npm publish failed
+        if: steps.npm.outcome != 'success'
+        run: |
+          echo "::error::npm publish failed. Configure npm trusted publishing for dvnold/fm-bench (release.yml) or refresh the NPM_TOKEN secret, then re-run this workflow."
+          exit 1
+
+      - name: Verify the published package
+        if: steps.npm.outcome == 'success'
+        env:
+          VERSION: ${{ steps.version.outputs.semver }}
+        run: |
+          set -euo pipefail
+          dir="$(mktemp -d)"
+          cd "$dir"
+          for attempt in 1 2 3 4 5 6; do
+            if npm view "fm-bench@${VERSION}" version >/dev/null 2>&1; then break; fi
+            echo "waiting for the registry (attempt $attempt)"
+            sleep 10
+          done
+          npm init -y >/dev/null
+          npm install "fm-bench@${VERSION}" --no-audit --no-fund
+          test "$(./node_modules/.bin/fm-bench --version)" = "$VERSION"
+          FM_BIN="$GITHUB_WORKSPACE/test/fixtures/fake-fm.mjs" ./node_modules/.bin/fm-bench --profile quick --no-progress --ci

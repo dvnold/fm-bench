@@ -1,0 +1,3 @@
+  Apple Foundation Models
+  ✓ system (AFM 3 Core Advanced)
+  ✗ pcc                           (Private Cloud Compute is not available in this context. Please use the Terminal app.)

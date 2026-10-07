@@ -28,7 +28,7 @@ const section = changelog.slice(afterHeading, next === -1 ? changelog.length : n
 
 const prevTag = previousVersion(changelog, version);
 const compare = prevTag
-  ? `\n\n**Full Changelog**: https://github.com/devinoldenburg/fm-bench/compare/v${prevTag}...v${version}`
+  ? `\n\n**Full Changelog**: https://github.com/dvnold/fm-bench/compare/v${prevTag}...v${version}`
   : '';
 
 process.stdout.write(`${section}${compare}\n`);

@@ -84,6 +84,7 @@ export function summarizeByModel(results, modelStatuses = [], options = {}) {
         model: status.name,
         concurrency,
         description: status.description,
+        identity: status.identity || '',
         available: status.available,
         unsupported: Boolean(status.unsupported),
         skippedReason: status.available ? '' : status.reason || 'Unavailable',
@@ -99,6 +100,7 @@ export function summarizeByModel(results, modelStatuses = [], options = {}) {
         model: result.model,
         concurrency: result.concurrency,
         description: '',
+        identity: '',
         available: true,
         unsupported: false,
         skippedReason: '',
@@ -119,12 +121,19 @@ export function summarizeByModel(results, modelStatuses = [], options = {}) {
     const tpot = summarizeNumbers(successes.map((result) => result.tpotMs).filter((value) => value != null));
     const promptTokens = summarizeNumbers(successes.map((result) => result.promptTokens).filter((value) => value != null));
     const outputTokens = summarizeNumbers(successes.map((result) => result.outputTokens).filter((value) => value != null));
+    const firstChunkTokens = summarizeNumbers(successes.map((result) => result.firstChunkTokens).filter((value) => value != null));
     const charsPerSecond = summarizeNumbers(successes.map((result) => result.charsPerSecond).filter((value) => value != null));
     const tokensPerSecond = summarizeNumbers(successes.map((result) => result.tokensPerSecond).filter((value) => value != null));
     const decodeTokensPerSecond = summarizeNumbers(successes.map((result) => result.decodeTokensPerSecond).filter((value) => value != null));
     const prefillTokensPerSecond = summarizeNumbers(successes.map((result) => result.prefillTokensPerSecond).filter((value) => value != null));
     const secondChunk = summarizeNumbers(successes.map((result) => result.secondChunkMs).filter((value) => value != null));
     const chunkGap = summarizeNumbers(successes.flatMap((result) => result.chunkGapsMs || []));
+    const decodeRuns = successes.filter((result) => result.decodeTokens != null && result.generationMs > 0);
+    const decodeMs = decodeRuns.reduce((sum, result) => sum + result.generationMs, 0);
+    // Token-weighted: a 3-token tail cannot outweigh a 200-token generation.
+    const decodeThroughput = decodeMs > 0
+      ? decodeRuns.reduce((sum, result) => sum + result.decodeTokens, 0) / (decodeMs / 1000)
+      : null;
     const windowMs = modelWindowMs(successes);
     const rps = successes.length > 0 && windowMs > 0 ? successes.length / (windowMs / 1000) : null;
     const goodputRps = goodMeasured.length > 0 && windowMs > 0 ? goodResults.length / (windowMs / 1000) : null;
@@ -137,6 +146,7 @@ export function summarizeByModel(results, modelStatuses = [], options = {}) {
       model: entry.model,
       concurrency: entry.concurrency,
       description: entry.description,
+      identity: entry.identity,
       available: entry.available,
       unsupported: entry.unsupported,
       skippedReason: entry.skippedReason,
@@ -147,6 +157,7 @@ export function summarizeByModel(results, modelStatuses = [], options = {}) {
       failures: failures.length,
       successRate: entry.results.length > 0 ? successes.length / entry.results.length : null,
       goodputRate: goodMeasured.length > 0 ? goodResults.length / goodMeasured.length : null,
+      stabilityCv: summarizeStability(successes),
       rps,
       goodputRps,
       outputTokenThroughput,
@@ -158,9 +169,11 @@ export function summarizeByModel(results, modelStatuses = [], options = {}) {
       tpot,
       promptTokens,
       outputTokens,
+      firstChunkTokens,
       charsPerSecond,
       tokensPerSecond,
       decodeTokensPerSecond,
+      decodeThroughput,
       prefillTokensPerSecond,
       secondChunk,
       chunkGap
@@ -220,6 +233,29 @@ function modelWindowMs(results) {
   const ends = results.map((result) => result.endOffsetMs).filter((value) => Number.isFinite(value));
   if (starts.length === 0 || ends.length === 0) return null;
   return Math.max(...ends) - Math.min(...starts);
+}
+
+/**
+ * Run-to-run latency stability: the E2E coefficient of variation of each
+ * prompt across its repeated runs, averaged over prompts.
+ *
+ * The pooled `latency.cv` mixes every prompt, so a suite with a one-line answer and a
+ * long generation reports high "variation" even when every prompt is
+ * perfectly steady. Grouping by prompt isolates repeat noise. `null` until at
+ * least one prompt has two successful runs.
+ */
+function summarizeStability(results) {
+  const byPrompt = new Map();
+  for (const result of results) {
+    if (!Number.isFinite(result.durationMs)) continue;
+    if (!byPrompt.has(result.promptId)) byPrompt.set(result.promptId, []);
+    byPrompt.get(result.promptId).push(result.durationMs);
+  }
+  const cvs = [...byPrompt.values()]
+    .map((durations) => summarizeNumbers(durations).cv)
+    .filter((cv) => cv != null);
+  if (cvs.length === 0) return null;
+  return cvs.reduce((sum, cv) => sum + cv, 0) / cvs.length;
 }
 
 function summarizeRepeatability(results) {

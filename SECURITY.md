@@ -17,4 +17,6 @@ Please do not open public issues for sensitive security reports.
 
 ## Reporting
 
-If you find a security issue, contact the repository owner privately through GitHub.
+If you find a security issue, report it privately through [GitHub private vulnerability reporting](https://github.com/dvnold/fm-bench/security/advisories/new). Only the latest release receives security fixes.
+
+Published npm releases carry [provenance](https://docs.npmjs.com/generating-provenance-statements) linking each tarball to the GitHub Actions run that built it: `npm view fm-bench dist.attestations`.

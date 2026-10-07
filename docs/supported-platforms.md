@@ -5,7 +5,7 @@
 ## Requirements
 
 - **macOS 27.0 or newer** — Apple's `fm` CLI is preinstalled starting with macOS 27. Older macOS releases do not ship `fm`, so `fm-bench` cannot run there.
-- **Node.js 20 or newer**.
+- **Node.js 22 or newer**. Node 20 reached end of life in April 2026; CI tests Node 22, 24, and 26.
 - **Apple Intelligence enabled** on the device.
 
 ## Version enforcement
@@ -31,13 +31,18 @@ Support is capability-based rather than version-pinned. The CLI probes the insta
 
 ## Models
 
-`fm-bench` benchmarks exactly the models the installed `fm` reports — it does not assume that any particular cloud or adapter model exists. On the verified macOS 27.0 build that is the on-device `system` model only. If a build adds models (for example a Private Cloud Compute model), they are discovered automatically and reported with their own availability.
+`fm-bench` benchmarks exactly the models the installed `fm` reports — it does not assume that any particular cloud or adapter model exists. macOS 27.0 ships the on-device `system` model only; macOS 27.2 adds `pcc` (Apple Foundation Model on Private Cloud Compute). New models are discovered automatically and reported with their own availability and identity.
 
-Requesting only models the build cannot run exits with code `2` before any benchmark starts, and `fm-bench models` shows the same reasons without failing:
+`fm` only serves `pcc` to the Terminal app. From editor terminals and other contexts it reports `Private Cloud Compute is not available in this context. Please use the Terminal app.`, and fm-bench shows that reason unchanged. Run fm-bench from Terminal to benchmark `pcc`.
+
+Requesting only models that cannot run right now exits with code `2` before any benchmark starts, and `fm-bench models` shows the same reasons without failing:
 
 ```text
 fm-bench: No benchmark was run: none of the requested models are usable right now.
   requested: pcc
-  pcc: not supported by this fm build (supported: system)
+  models reported by this fm build: system, pcc
+  pcc: Private Cloud Compute is not available in this context. Please use the Terminal app.
   run "fm-bench models" to see availability and reasons
 ```
+
+On a build that does not have the model at all, the reason reads `not supported by this fm build (supported: system)` instead.
